@@ -23,7 +23,10 @@ fn cleanup_keeps_raw_line_when_model_expands_it() {
     let raw = "ship it friday";
     assert_eq!(accept_cleanup(raw, "Ship it Friday."), "Ship it Friday.");
     assert_eq!(
-        accept_cleanup(raw, "We should definitely ship it on Friday and tell the team."),
+        accept_cleanup(
+            raw,
+            "We should definitely ship it on Friday and tell the team."
+        ),
         raw
     );
     assert_eq!(accept_cleanup(raw, "   "), raw);

@@ -41,7 +41,13 @@ async fn main() -> Result<()> {
         model: PathBuf::from(llama_model),
     };
 
-    tokio::spawn(pipeline::run(capture.audio_rx, stt, cleaner, tx));
+    tokio::spawn(pipeline::run(
+        capture.audio_rx,
+        capture.sample_rate,
+        stt,
+        cleaner,
+        tx,
+    ));
 
     // v0 surface: terminal. The same Cue stream is what an eframe/Tauri overlay
     // and the later browser extension subscribe to.

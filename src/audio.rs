@@ -1,7 +1,7 @@
 use anyhow::{anyhow, Result};
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use cpal::{SampleFormat, Stream};
-use ringbuf::traits::{Producer, Split};
+use ringbuf::traits::{Consumer, Producer, Split};
 use ringbuf::HeapRb;
 use std::sync::{Arc, Mutex};
 
@@ -19,6 +19,13 @@ pub struct AudioRx {
 }
 
 impl AudioRx {
+    /// Wrap a ring consumer. Capture uses it; tests feed synthetic PCM through it.
+    pub fn new(cons: ringbuf::HeapCons<f32>) -> Self {
+        Self {
+            inner: Arc::new(Mutex::new(cons)),
+        }
+    }
+
     /// Non-blocking drain. The audio callback must never wait on this.
     pub fn drain(&self, out: &mut Vec<f32>) {
         let mut cons = self.inner.lock().expect("audio ring poisoned");
@@ -71,9 +78,7 @@ pub fn start_loopback() -> Result<Capture> {
         device_name,
         sample_rate,
         channels,
-        audio_rx: AudioRx {
-            inner: Arc::new(Mutex::new(cons)),
-        },
+        audio_rx: AudioRx::new(cons),
         _stream: stream,
     })
 }
@@ -86,7 +91,7 @@ fn build<T>(
     to_f32: fn(T) -> f32,
 ) -> Result<Stream>
 where
-    T: cpal::SizedSample,
+    T: cpal::SizedSample + 'static,
 {
     let ch = channels as usize;
     let stream = device.build_input_stream(
