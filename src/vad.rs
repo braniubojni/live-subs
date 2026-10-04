@@ -33,6 +33,7 @@ pub struct Segmenter {
     sample_rate: u32,
     speech: Vec<f32>,
     silence_samples: u32,
+    voiced_samples: usize,
     in_speech: bool,
 }
 
@@ -43,6 +44,7 @@ impl Segmenter {
             sample_rate,
             speech: Vec::with_capacity(sample_rate as usize * 4),
             silence_samples: 0,
+            voiced_samples: 0,
             in_speech: false,
         }
     }
@@ -53,6 +55,7 @@ impl Segmenter {
         if voiced {
             self.in_speech = true;
             self.silence_samples = 0;
+            self.voiced_samples += frame.len();
             self.speech.extend_from_slice(frame);
             if self.speech.len() >= samples(self.sample_rate, self.cfg.max_speech_ms) {
                 return Some(self.take_end());
@@ -64,10 +67,15 @@ impl Segmenter {
         }
         self.silence_samples += frame.len() as u32;
         self.speech.extend_from_slice(frame);
-        if self.silence_samples >= samples(self.sample_rate, self.cfg.silence_ms) as u32
-            && self.speech.len() >= samples(self.sample_rate, self.cfg.min_speech_ms)
-        {
-            return Some(self.take_end());
+        if self.silence_samples >= samples(self.sample_rate, self.cfg.silence_ms) as u32 {
+            if self.voiced_samples >= samples(self.sample_rate, self.cfg.min_speech_ms) {
+                return Some(self.take_end());
+            }
+            // Blip shorter than min speech: drop it so it cannot merge with the next burst.
+            self.speech.clear();
+            self.in_speech = false;
+            self.silence_samples = 0;
+            self.voiced_samples = 0;
         }
         None
     }
@@ -80,6 +88,7 @@ impl Segmenter {
         let speech = std::mem::take(&mut self.speech);
         self.in_speech = false;
         self.silence_samples = 0;
+        self.voiced_samples = 0;
         VadEvent::Ended { speech }
     }
 }
@@ -105,14 +114,20 @@ mod tests {
     #[test]
     fn short_blip_is_dropped() {
         let mut seg = Segmenter::new(16_000, VadConfig::default());
-        assert!(matches!(seg.push(&tone(1_600, 0.2)), Some(VadEvent::Speaking)));
+        assert!(matches!(
+            seg.push(&tone(1_600, 0.2)),
+            Some(VadEvent::Speaking)
+        ));
         assert!(seg.push(&tone(8_000, 0.0)).is_none());
     }
 
     #[test]
     fn speech_then_silence_ends_the_utterance() {
         let mut seg = Segmenter::new(16_000, VadConfig::default());
-        assert!(matches!(seg.push(&tone(8_000, 0.2)), Some(VadEvent::Speaking)));
+        assert!(matches!(
+            seg.push(&tone(8_000, 0.2)),
+            Some(VadEvent::Speaking)
+        ));
         match seg.push(&tone(8_000, 0.0)) {
             Some(VadEvent::Ended { speech }) => assert!(speech.len() > 8_000),
             other => panic!("expected Ended, got {other:?}"),

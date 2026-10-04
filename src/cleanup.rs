@@ -30,21 +30,23 @@ impl Cleaner for LlamaCli {
         );
         let out = tokio::time::timeout(
             Duration::from_millis(700),
-            tokio::process::Command::new(&self.bin).args([
-                "-m",
-                self.model.to_str().unwrap_or(""),
-                "-p",
-                &prompt,
-                "-n",
-                "64",
-                "--temp",
-                "0",
-                "-c",
-                "512",
-                "--no-display-prompt",
-                "-ngl",
-                "99",
-            ]).output(),
+            tokio::process::Command::new(&self.bin)
+                .args([
+                    "-m",
+                    self.model.to_str().unwrap_or(""),
+                    "-p",
+                    &prompt,
+                    "-n",
+                    "64",
+                    "--temp",
+                    "0",
+                    "-c",
+                    "512",
+                    "--no-display-prompt",
+                    "-ngl",
+                    "99",
+                ])
+                .output(),
         )
         .await
         .map_err(|_| anyhow!("cleanup timed out"))??;

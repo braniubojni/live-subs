@@ -13,6 +13,9 @@ use tracing::info;
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    // Optional .env in the working directory. Real env vars win over it.
+    dotenvy::dotenv().ok();
+
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()
@@ -41,7 +44,13 @@ async fn main() -> Result<()> {
         model: PathBuf::from(llama_model),
     };
 
-    tokio::spawn(pipeline::run(capture.audio_rx, stt, cleaner, tx));
+    tokio::spawn(pipeline::run(
+        capture.audio_rx,
+        capture.sample_rate,
+        stt,
+        cleaner,
+        tx,
+    ));
 
     // v0 surface: terminal. The same Cue stream is what an eframe/Tauri overlay
     // and the later browser extension subscribe to.

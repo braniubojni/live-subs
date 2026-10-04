@@ -83,12 +83,7 @@ cmake --build llama.cpp/build -j --target llama-cli
 ## Run
 
 ```bash
-export WHISPER_BIN=$PWD/whisper.cpp/build/bin/whisper-cli
-export WHISPER_MODEL=$PWD/models/ggml-tiny.bin
-export LLAMA_BIN=$PWD/llama.cpp/build/bin/llama-cli
-export LLAMA_MODEL=$PWD/models/cleanup-q4.gguf
-export SUBS_RATE=48000   # use the rate printed on startup
-
+cp .env.example .env   # edit paths if yours differ
 cargo run --release
 ```
 
