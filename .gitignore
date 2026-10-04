@@ -1,0 +1,8 @@
+/target
+**/*.rs.bk
+.DS_Store
+
+# Models are downloaded locally. Do not commit weights.
+models/*.bin
+models/*.gguf
+models/*.onnx
