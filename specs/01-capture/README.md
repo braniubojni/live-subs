@@ -4,7 +4,9 @@
 Mono f32 samples at a known rate reach the pipeline from system audio on macOS, Windows, and Linux. The callback never blocks, allocates, or loses the rate.
 
 ## Current state
-[src/audio.rs](../../src/audio.rs): opens the default output device as an input stream, downmixes in the callback, pushes into a `HeapRb` behind `Arc<Mutex<..>>`. `Capture` exposes `sample_rate` but `pipeline::run` ignores it and reads `SUBS_RATE` (default 48000).
+[src/audio.rs](../../src/audio.rs) opens the default output device as an input stream, downmixes in the callback, and pushes into a `HeapRb` behind `Arc<Mutex<..>>`. `Capture` exposes `sample_rate`. [src/main.rs](../../src/main.rs) passes that rate into `pipeline::run`. There is no `SUBS_RATE`.
+
+`SUBS_DEVICE` still matches input devices only. The callback still locks a mutex and calls `try_push` per sample.
 
 ## Todo
 - [x] **Pass the rate through.** `pipeline::run` takes `sample_rate: u32` (or `Capture` hands over an `AudioRx` that knows its rate). Delete the `SUBS_RATE` read in [src/pipeline.rs](../../src/pipeline.rs) and the README export line. Accept: wrong-rate garbling is impossible without editing code.

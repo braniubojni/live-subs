@@ -4,13 +4,25 @@
 Resample, cut, transcribe, clean, emit `Cue`s with stable ids and strict per-utterance ordering. Testable end to end with fakes and no audio device.
 
 ## Current state
-[src/pipeline.rs](../../src/pipeline.rs): one `worker` loop does drain, resample, VAD, partial scheduling, and final scheduling inline. Detached `tokio::spawn` tasks send cues.
+[src/pipeline.rs](../../src/pipeline.rs) is still one `worker` loop: drain, resample, VAD, partial scheduling, final scheduling. Detached `tokio::spawn` tasks send cues.
+
+Landed in #1:
+
+- `run` takes `in_rate` from capture. No `SUBS_RATE`.
+- Id is assigned for the utterance and reused for its partial and final, then incremented.
+- `ended` drops a partial whose utterance has already closed. Check-then-send is not atomic; noted in the source.
+- Partials use `try_send`. Finals use `send`. A closed channel is logged.
+- A resample error resets the resampler and skips the frame. That path has no test.
+
+Fakes live inline in [tests/pipeline.rs](../../tests/pipeline.rs), not in `tests/common/`. The clock is `Instant::now()`.
 
 ## Bugs to fix first
-- **Id mismatch.** Partial uses `cue_id = id` (current utterance index), the `Ended` path does `id += 1` then uses it. The partial for utterance 3 carries id 2... then the final carries id 3. Consumers cannot match partial to final. Assign the id when speech starts, use it for partials and the final.
-- **Late partial overwrites final.** Partial and final tasks race. A slow partial can send after the final. Track per-utterance state; drop partials once the utterance ended (generation check before send).
-- **Dropped on full channel.** `tx.send(..).await` in detached tasks can stall; `let _ =` hides closed channel. Decide policy: partials use `try_send` (droppable), finals use `send`.
-- **Resampler error kills the loop.** `?` inside `loop` ends the pipeline with one log line. Reset and continue on a bad frame; stop only on fatal.
+Fixed in #1. Kept here so the tests stay the regression net.
+
+- **Id mismatch.** Partial and final used different ids. Id is now taken, then incremented on `Ended`.
+- **Late partial overwrites final.** Partial task checks `ended` before send.
+- **Dropped on full channel.** Partials `try_send`, finals `send`.
+- **Resampler error kills the loop.** Error resets and continues. Still untested.
 
 ## Todo
 - [x] **Fix the four bugs above**, each with a failing test first. (Tests in `tests/pipeline.rs`; the channel-policy test passed before the fix and guards regression. Resampler-reset path has no test.)
@@ -24,9 +36,12 @@ Resample, cut, transcribe, clean, emit `Cue`s with stable ids and strict per-utt
 - [ ] **Allocation in the loop.** `pending.drain(..960).collect()` allocates per frame. Reuse a frame buffer. Accept: no `collect` in the hot loop.
 - [ ] **Graceful shutdown.** Ctrl-C stops capture, flushes the current utterance as a final, then exits. Accept: manual check plus a test using a cancellation token.
 - [ ] **Metrics.** Per-stage latency (vad end to STT done, STT to cleanup done) via `tracing` spans. Accept: one log line per final with both numbers.
+- [ ] **Resampler reset test.** Feed a frame that makes `process` fail, assert the worker is still running and later frames still emit. Accept: one test, no device.
 
 ## Tests
-Everything via fakes in `tests/common/`: `FakeSource`, `FakeStt`, `FakeCleaner`, paused tokio time. Assertions on ordered `Vec<Cue>`.
+Today: three tests in `tests/pipeline.rs` with inline `FakeStt` / `FakeCleaner` and a pre-filled ring. They use real sleeps.
+
+Still to add, once the stages split: `tests/common/` with `FakeSource`, `FakeStt`, `FakeCleaner`, paused tokio time. Assertions on an ordered `Vec<Cue>`.
 
 ## Out of scope
 Multi-stream mixing. Persisting transcripts.
