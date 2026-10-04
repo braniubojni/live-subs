@@ -84,8 +84,6 @@ cmake --build llama.cpp/build -j --target llama-cli
 
 ```bash
 cp .env.example .env   # edit paths if yours differ
-set -a; . ./.env; set +a
-
 cargo run --release
 ```
 

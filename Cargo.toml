@@ -21,6 +21,7 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 # Overlay is optional. Enable with `--features overlay` once you want a window.
 # eframe pulls wgpu; skip it until the pipeline is proven in the terminal.
 eframe = { version = "0.31", optional = true }
+dotenvy = "0.15.7"
 
 [features]
 default = []
