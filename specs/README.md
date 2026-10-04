@@ -30,11 +30,15 @@ Constraints from the root [README](../README.md) apply to every spec: no `unsafe
 Still open. Each is detailed in its folder.
 
 1. `llama-cli` may enter interactive conversation mode and hang. The timeout drops the future but does not kill the child. (04)
-2. Temp WAV name is millisecond-based. Two transcriptions in the same ms collide. (03)
-3. Audio callback takes a `Mutex`. (01)
+2. Audio callback takes a `Mutex`. (01)
 
 Fixed in #1, do not re-open:
 
 - `SUBS_RATE` is gone. The pipeline takes the capture rate. (01, 05)
 - Partial and final share an utterance id. (05)
 - A late partial is dropped once the utterance has ended. The check-then-send window is documented in `pipeline.rs`. (05)
+
+Fixed with 03 slice (unique temp WAV, kill on timeout), do not re-open:
+
+- Temp WAV name is `subs-<pid>-<seq>.wav`, removed on every path. (03)
+- `whisper-cli` is killed when the STT timeout drops its future. (03)
