@@ -78,7 +78,7 @@ cmake --build whisper.cpp/build -j --target whisper-cli
 git clone https://github.com/ggml-org/llama.cpp
 git -C llama.cpp checkout 7f2dd88b0ac393357ae6a9e1992185a48c20b13b   # b11395
 cmake -S llama.cpp -B llama.cpp/build
-cmake --build llama.cpp/build -j --target llama-completion
+cmake --build llama.cpp/build -j --target llama-completion --target llama-server
 ```
 
 ## Run
@@ -87,6 +87,8 @@ cmake --build llama.cpp/build -j --target llama-completion
 cp .env.example .env   # edit paths if yours differ
 cargo run --release
 ```
+
+Set `LLAMA_SERVER` to the `llama-server` binary to keep the cleanup model loaded between lines. Unset, each line spawns `llama-completion` and reloads the model.
 
 macOS asks for system-audio recording permission. Grant it to the terminal you launch from. On Linux, list monitor sources with `pactl list sources short` and set `SUBS_DEVICE` to that name.
 
@@ -125,7 +127,7 @@ Tests are required for behavior you can run without a microphone:
 | `src/audio.rs` | Loopback capture. Callback only downmixes and pushes `f32`. |
 | `src/vad.rs` | RMS gate. Swap for Silero later. The segmenter API stays. |
 | `src/stt.rs` | `whisper-cli` behind a `Transcriber` trait. |
-| `src/cleanup.rs` | `llama-completion -no-cnv`, temp 0, 512 context, 64 tokens. |
+| `src/cleanup.rs` | `LlamaCli` (`llama-completion -no-cnv` per line) and `LlamaServer` (warm `llama-server`, `/completion`), temp 0, 512 context, 64 tokens. |
 | `src/pipeline.rs` | Resample, cut, emit cues. Capture never awaits a model. |
 | `tests/segments.rs` | Integration coverage of the VAD cut and the cleanup guard. |
 
