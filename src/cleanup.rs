@@ -1,9 +1,10 @@
 use anyhow::{anyhow, Result};
+use std::collections::VecDeque;
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt};
 use tokio::sync::Notify;
 
 const SYSTEM: &str = "\
@@ -121,6 +122,22 @@ impl Drop for LlamaServer {
     }
 }
 
+const STDERR_TAIL: usize = 20;
+
+/// Last `cap` lines of `r`, each cut to 300 chars. Memory stays bounded.
+/// ponytail: a single endless line still grows `next_line`'s buffer; llama.cpp logs real lines.
+async fn tail_lines<R: tokio::io::AsyncRead + Unpin>(r: R, cap: usize) -> VecDeque<String> {
+    let mut tail = VecDeque::with_capacity(cap);
+    let mut lines = tokio::io::BufReader::new(r).lines();
+    while let Ok(Some(line)) = lines.next_line().await {
+        if tail.len() == cap {
+            tail.pop_front();
+        }
+        tail.push_back(line.chars().take(300).collect());
+    }
+    tail
+}
+
 /// Grab a free port and release it. The server binds it later, so another process can win
 /// the race; the supervisor then sees the child exit and picks a new port.
 fn free_port() -> Result<u16> {
@@ -195,11 +212,21 @@ impl LlamaServer {
                     .args(["--host", "127.0.0.1", "--port", &port.to_string()])
                     .args(["-c", "512", "-ngl", "99"])
                     .stdout(std::process::Stdio::null())
-                    .stderr(std::process::Stdio::null())
+                    .stderr(std::process::Stdio::piped())
                     .kill_on_drop(true)
                     .spawn()?;
+                let stderr = child.stderr.take();
                 Ok(async move {
-                    let _ = child.wait().await;
+                    // stderr closes when the child dies; keep only its last lines.
+                    let tail = match stderr {
+                        Some(r) => tail_lines(r, STDERR_TAIL).await,
+                        None => VecDeque::new(),
+                    };
+                    let status = child.wait().await;
+                    tracing::warn!(
+                        "llama-server exited ({status:?}), stderr tail:\n{}",
+                        Vec::from(tail).join("\n")
+                    );
                 })
             },
             BACKOFF,
@@ -282,6 +309,8 @@ impl Cleaner for LlamaServer {
                 Ok(raw.to_string())
             }
             Err(_) => {
+                // Accepted but never answered: hung. The grace rule decides if it dies.
+                self.down.notify_one();
                 tracing::warn!("llama-server timed out, keeping raw");
                 Ok(raw.to_string())
             }
@@ -395,6 +424,13 @@ mod tests {
         assert_eq!(out, "ship it friday");
     }
 
+    /// Point the client at a fake listener. Yields first so the supervisor has already
+    /// published its own address and cannot overwrite ours.
+    async fn point_at(srv: &LlamaServer, addr: std::net::SocketAddr) {
+        tokio::task::yield_now().await;
+        *srv.addr.lock().unwrap() = Some(addr);
+    }
+
     fn quick(grace_ms: u64) -> Backoff {
         Backoff {
             min: Duration::from_millis(100),
@@ -466,6 +502,56 @@ mod tests {
         tokio::time::sleep(Duration::from_millis(300)).await;
         assert_eq!(spawns.load(Ordering::SeqCst), 1);
         assert!(srv.addr.lock().unwrap().is_some());
+    }
+
+    #[tokio::test]
+    async fn timeout_on_live_address_restarts_child() {
+        let spawns = Arc::new(AtomicUsize::new(0));
+        let n = spawns.clone();
+        let srv = LlamaServer::start(
+            move |_port| {
+                n.fetch_add(1, Ordering::SeqCst);
+                Ok(std::future::pending::<()>())
+            },
+            quick(0),
+        )
+        .unwrap();
+        // Accepts, reads nothing, never answers.
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        point_at(&srv, listener.local_addr().unwrap()).await;
+        let _hold = tokio::spawn(async move {
+            let _conn = listener.accept().await;
+            std::future::pending::<()>().await;
+        });
+        assert_eq!(srv.clean("ship it friday").await.unwrap(), "ship it friday");
+        until("restart", || spawns.load(Ordering::SeqCst) >= 2).await;
+    }
+
+    #[tokio::test]
+    async fn loading_503_never_restarts_child() {
+        let spawns = Arc::new(AtomicUsize::new(0));
+        let n = spawns.clone();
+        // Grace 0: a restart would be allowed, so only a missing notify keeps the child.
+        let srv = LlamaServer::start(
+            move |_port| {
+                n.fetch_add(1, Ordering::SeqCst);
+                Ok(std::future::pending::<()>())
+            },
+            quick(0),
+        )
+        .unwrap();
+        let (addr, _seen) = fake("HTTP/1.0 503 Service Unavailable\r\n\r\nLoading model").await;
+        point_at(&srv, addr).await;
+        assert_eq!(srv.clean("ship it friday").await.unwrap(), "ship it friday");
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        assert_eq!(spawns.load(Ordering::SeqCst), 1);
+        assert_eq!(*srv.addr.lock().unwrap(), Some(addr));
+    }
+
+    #[tokio::test]
+    async fn stderr_tail_keeps_last_lines() {
+        let tail = super::tail_lines(&b"a\nb\nc\nd\n"[..], 2).await;
+        assert_eq!(Vec::from(tail), ["c", "d"]);
     }
 
     #[test]
