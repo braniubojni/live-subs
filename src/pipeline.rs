@@ -41,7 +41,7 @@ pub async fn run<S, C>(
 }
 
 async fn worker<S, C>(
-    audio: AudioRx,
+    mut audio: AudioRx,
     in_rate: u32,
     stt: Arc<S>,
     cleaner: Arc<C>,
