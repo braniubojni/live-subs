@@ -5,7 +5,7 @@ use crate::vad::{Segmenter, VadConfig, VadEvent};
 use anyhow::Result;
 use rubato::{FastFixedIn, PolynomialDegree, Resampler};
 use serde::Serialize;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -64,6 +64,8 @@ where
     let mut id: u64 = 0;
     let mut last_partial = Instant::now() - Duration::from_secs(10);
     let partial_busy = Arc::new(AtomicBool::new(false));
+    // Count of utterances closed so far. A partial for id k is stale once this is > k.
+    let ended = Arc::new(AtomicU64::new(0));
 
     loop {
         let mut chunk = Vec::new();
@@ -75,7 +77,14 @@ where
         pending.extend(chunk);
         while pending.len() >= 960 {
             let frame: Vec<f32> = pending.drain(..960).collect();
-            let out = resampler.process(&[frame], None)?;
+            let out = match resampler.process(&[frame], None) {
+                Ok(out) => out,
+                Err(err) => {
+                    tracing::warn!(?err, "resample failed, skipping frame");
+                    resampler.reset();
+                    continue;
+                }
+            };
             let mono = &out[0];
             if let Some(ev) = seg.push(mono) {
                 match ev {
@@ -89,25 +98,29 @@ where
                             let stt = stt.clone();
                             let tx = tx.clone();
                             let busy = partial_busy.clone();
+                            let ended = ended.clone();
                             let cue_id = id;
                             tokio::spawn(async move {
                                 let text = stt.transcribe(&speech).await.unwrap_or_default();
                                 busy.store(false, Ordering::Release);
-                                if !text.is_empty() {
-                                    let _ = tx
-                                        .send(Cue {
-                                            kind: CueKind::Partial,
-                                            text,
-                                            id: cue_id,
-                                        })
-                                        .await;
+                                // ponytail: check-then-send is not atomic; the final needs a
+                                // full STT run first, so the window is negligible. Per-utterance
+                                // lock if it ever shows up.
+                                if !text.is_empty() && ended.load(Ordering::Acquire) <= cue_id {
+                                    // Partials are droppable. A full channel must not stall.
+                                    let _ = tx.try_send(Cue {
+                                        kind: CueKind::Partial,
+                                        text,
+                                        id: cue_id,
+                                    });
                                 }
                             });
                         }
                     }
                     VadEvent::Ended { speech } => {
-                        id += 1;
                         let cue_id = id;
+                        id += 1;
+                        ended.store(id, Ordering::Release);
                         let stt = stt.clone();
                         let cleaner = cleaner.clone();
                         let tx = tx.clone();
@@ -121,21 +134,22 @@ where
                             if raw.is_empty() {
                                 return;
                             }
-                            let _ = tx
-                                .send(Cue {
-                                    kind: CueKind::Partial,
-                                    text: raw.clone(),
-                                    id: cue_id,
-                                })
-                                .await;
+                            let _ = tx.try_send(Cue {
+                                kind: CueKind::Partial,
+                                text: raw.clone(),
+                                id: cue_id,
+                            });
                             let text = cleaner.clean(&raw).await.unwrap_or(raw);
-                            let _ = tx
+                            let sent = tx
                                 .send(Cue {
                                     kind: CueKind::Final,
                                     text,
                                     id: cue_id,
                                 })
                                 .await;
+                            if sent.is_err() {
+                                tracing::debug!(cue_id, "cue channel closed");
+                            }
                         });
                     }
                 }

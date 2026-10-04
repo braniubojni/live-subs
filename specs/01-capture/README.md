@@ -7,7 +7,7 @@ Mono f32 samples at a known rate reach the pipeline from system audio on macOS, 
 [src/audio.rs](../../src/audio.rs): opens the default output device as an input stream, downmixes in the callback, pushes into a `HeapRb` behind `Arc<Mutex<..>>`. `Capture` exposes `sample_rate` but `pipeline::run` ignores it and reads `SUBS_RATE` (default 48000).
 
 ## Todo
-- [ ] **Pass the rate through.** `pipeline::run` takes `sample_rate: u32` (or `Capture` hands over an `AudioRx` that knows its rate). Delete the `SUBS_RATE` read in [src/pipeline.rs](../../src/pipeline.rs) and the README export line. Accept: wrong-rate garbling is impossible without editing code.
+- [x] **Pass the rate through.** `pipeline::run` takes `sample_rate: u32` (or `Capture` hands over an `AudioRx` that knows its rate). Delete the `SUBS_RATE` read in [src/pipeline.rs](../../src/pipeline.rs) and the README export line. Accept: wrong-rate garbling is impossible without editing code.
 - [ ] **Remove the mutex from the callback.** Own the producer inside the closure (`move`), own the consumer in `AudioRx` without a lock (`&mut self` drain, or a single reader task). Accept: no `Mutex` in `audio.rs`; no `expect` on lock in the callback.
 - [ ] **Drop counter.** `try_push` failures increment an `AtomicU64`. Expose `AudioRx::dropped()`. Log once per second when it grows. Accept: overrun is visible.
 - [ ] **Bulk push.** Downmix into a fixed stack/preallocated buffer and `push_slice` instead of per-sample `try_push`. Accept: no per-sample call; callback stays allocation-free.

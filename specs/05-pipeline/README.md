@@ -13,8 +13,8 @@ Resample, cut, transcribe, clean, emit `Cue`s with stable ids and strict per-utt
 - **Resampler error kills the loop.** `?` inside `loop` ends the pipeline with one log line. Reset and continue on a bad frame; stop only on fatal.
 
 ## Todo
-- [ ] **Fix the four bugs above**, each with a failing test first.
-- [ ] **Rate from capture** (see [01](../01-capture/README.md)). Remove `SUBS_RATE`.
+- [x] **Fix the four bugs above**, each with a failing test first. (Tests in `tests/pipeline.rs`; the channel-policy test passed before the fix and guards regression. Resampler-reset path has no test.)
+- [x] **Rate from capture** (see [01](../01-capture/README.md)). Remove `SUBS_RATE`.
 - [ ] **Split `worker`.** Pure stages: `Resample`, `Vad`, `PartialScheduler` (decides when to fire, given elapsed and speech length), `Finalizer`. Accept: `worker` is a short loop wiring stages; scheduler is unit-tested with a fake clock.
 - [ ] **Injectable clock.** `Instant::now()` behind a small trait or `tokio::time::pause` in tests. Accept: no real sleeps in pipeline tests.
 - [ ] **Input as a trait.** `AudioSource { fn drain(&mut self, out:&mut Vec<f32>) }` so tests feed synthetic PCM. Accept: integration test runs speech/silence/speech through fake STT and fake cleaner and asserts the exact cue sequence.
