@@ -44,7 +44,7 @@ fn audio() -> AudioRx {
     let silence = vec![0.0_f32; RATE as usize];
     prod.push_slice(&tone);
     prod.push_slice(&silence);
-    AudioRx::new(cons)
+    AudioRx::new(cons, Default::default())
 }
 
 /// Run the pipeline and collect cues until `idle` passes with none arriving.
