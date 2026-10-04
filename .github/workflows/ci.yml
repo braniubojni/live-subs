@@ -14,6 +14,9 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
+      - name: System libraries
+        # cpal links ALSA on Linux.
+        run: sudo apt-get update && sudo apt-get install -y libasound2-dev pkg-config
       - name: Format
         run: cargo fmt --all -- --check
       - name: Lint
