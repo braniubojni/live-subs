@@ -4,11 +4,11 @@
 Remove fillers, fix punctuation and case on a final line within a hard 700 ms budget. Never delay or corrupt the subtitle. On any doubt, show the raw line.
 
 ## Current state
-[src/cleanup.rs](../../src/cleanup.rs): spawns `llama-cli` per line with ChatML prompt, `-n 64 --temp 0 -c 512 -ngl 99`, 700 ms timeout, `accept_cleanup` rejects empty or more than 2x length.
+[src/cleanup.rs](../../src/cleanup.rs): spawns `llama-completion -no-cnv` per line with ChatML prompt, `-n 64 --temp 0 -c 512 -ngl 99`, `kill_on_drop(true)`, 700 ms timeout. A timeout returns an error that the pipeline turns into the raw line; a non-zero exit returns the raw line directly. `accept_cleanup` rejects empty or more than 2x length (unchanged). llama.cpp is pinned to `b11395` (`7f2dd88b0ac393357ae6a9e1992185a48c20b13b`) in the root README. `llama-completion` is used because the current `llama-cli` ignores `-no-cnv` and blocks at `>` (llama.cpp#27214, open when pinned).
 
 ## Todo
-- [ ] **Stop interactive mode.** Pass `-no-cnv` (or the current non-interactive flag for the pinned llama.cpp). Pin the llama.cpp commit in the README. Accept: `llama-cli` exits on its own after the answer.
-- [ ] **Kill on timeout.** `kill_on_drop(true)`; timeout currently drops the future and leaves the child running. Accept: no orphan process after a timed-out call.
+- [x] **Stop interactive mode.** Pass `-no-cnv` (or the current non-interactive flag for the pinned llama.cpp). Pin the llama.cpp commit in the README. Accept: `llama-completion` exits on its own after the answer.
+- [x] **Kill on timeout.** `kill_on_drop(true)`; timeout currently drops the future and leaves the child running. Accept: no orphan process after a timed-out call.
 - [ ] **Cold start vs 700 ms.** Loading a model per call cannot meet the cap. Add `LlamaServer` implementation: spawn `llama-server` once, keep it warm, POST `/completion` with `n_predict`, `temperature: 0`, `cache_prompt: true` for the fixed system prompt. Same `Cleaner` trait. Accept: p95 under 400 ms on a fixture set, recorded in the PR.
 - [ ] **Health and restart.** If the server dies, restart with backoff; meanwhile `clean` returns raw immediately. Accept: kill the server mid-run, subtitles keep flowing.
 - [ ] **Stronger acceptance guard.** `accept_cleanup` also checks: no digits added or removed, similar word set (normalized Levenshtein or token overlap threshold), no newline, no leading "Here is". Accept: table test with real bad outputs (translation, added sentence, explanation prefix).

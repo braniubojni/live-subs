@@ -43,9 +43,14 @@ impl Cleaner for LlamaCli {
                     "-c",
                     "512",
                     "--no-display-prompt",
+                    // llama-completion honours this. New llama-cli ignores it and hangs
+                    // at ">" (llama.cpp#27214).
+                    "-no-cnv",
                     "-ngl",
                     "99",
                 ])
+                // Dropping the future (timeout, shutdown) must not orphan the child.
+                .kill_on_drop(true)
                 .output(),
         )
         .await
@@ -53,7 +58,7 @@ impl Cleaner for LlamaCli {
         if !out.status.success() {
             // A missing model must not drop the subtitle. Return the raw line.
             tracing::warn!(
-                "llama-cli failed, keeping raw: {}",
+                "llama-completion failed, keeping raw: {}",
                 String::from_utf8_lossy(&out.stderr)
             );
             return Ok(raw.to_string());

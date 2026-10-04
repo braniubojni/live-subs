@@ -26,7 +26,7 @@ async fn main() -> Result<()> {
     let whisper_bin = std::env::var("WHISPER_BIN").unwrap_or_else(|_| "whisper-cli".into());
     let whisper_model =
         std::env::var("WHISPER_MODEL").unwrap_or_else(|_| "models/ggml-tiny.bin".into());
-    let llama_bin = std::env::var("LLAMA_BIN").unwrap_or_else(|_| "llama-cli".into());
+    let llama_bin = std::env::var("LLAMA_BIN").unwrap_or_else(|_| "llama-completion".into());
     let llama_model =
         std::env::var("LLAMA_MODEL").unwrap_or_else(|_| "models/cleanup-q4.gguf".into());
 

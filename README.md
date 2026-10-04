@@ -40,19 +40,19 @@ cpal callback --ringbuf--> resample 16 kHz --> energy VAD
                                           whisper-cli (partial every 0.9 s)
                                                  |
                                                  v
-                                          llama-cli, 700 ms cap, temp 0
+                                          llama-completion, 700 ms cap, temp 0
                                                  |
                                                  v
                                           Cue { partial | final }
 ```
 
-Partials are the raw Whisper line. The final cue replaces that line after cleanup. Cleanup never blocks the next utterance. If `llama-cli` is missing, slow, or returns a line more than twice as long as the source, the raw line stays.
+Partials are the raw Whisper line. The final cue replaces that line after cleanup. Cleanup never blocks the next utterance. If `llama-completion` is missing, slow, or returns a line more than twice as long as the source, the raw line stays.
 
 ## Requirements
 
 - Rust stable, with `rustfmt` and `clippy` (`rust-toolchain.toml` installs both)
 - A built `whisper-cli` from whisper.cpp
-- A built `llama-cli` from llama.cpp
+- A built `llama-completion` from llama.cpp (pinned to `b11395`)
 - macOS 14.6+ for output-device loopback, Windows WASAPI loopback, or a Linux monitor source
 
 ## Setup
@@ -76,8 +76,9 @@ cmake -S whisper.cpp -B whisper.cpp/build
 cmake --build whisper.cpp/build -j --target whisper-cli
 
 git clone https://github.com/ggml-org/llama.cpp
+git -C llama.cpp checkout 7f2dd88b0ac393357ae6a9e1992185a48c20b13b   # b11395
 cmake -S llama.cpp -B llama.cpp/build
-cmake --build llama.cpp/build -j --target llama-cli
+cmake --build llama.cpp/build -j --target llama-completion
 ```
 
 ## Run
@@ -124,7 +125,7 @@ Tests are required for behavior you can run without a microphone:
 | `src/audio.rs` | Loopback capture. Callback only downmixes and pushes `f32`. |
 | `src/vad.rs` | RMS gate. Swap for Silero later. The segmenter API stays. |
 | `src/stt.rs` | `whisper-cli` behind a `Transcriber` trait. |
-| `src/cleanup.rs` | `llama-cli`, temp 0, 512 context, 64 tokens. |
+| `src/cleanup.rs` | `llama-completion -no-cnv`, temp 0, 512 context, 64 tokens. |
 | `src/pipeline.rs` | Resample, cut, emit cues. Capture never awaits a model. |
 | `tests/segments.rs` | Integration coverage of the VAD cut and the cleanup guard. |
 

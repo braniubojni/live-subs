@@ -27,10 +27,9 @@ Constraints from the root [README](../README.md) apply to every spec: no `unsafe
 
 ## Known bugs found while writing these
 
-Still open. Each is detailed in its folder.
+Fixed in #2, do not re-open:
 
-1. `llama-cli` may enter interactive conversation mode and hang. The timeout drops the future but does not kill the child. (04)
-2. Audio callback takes a `Mutex`. (01)
+- The audio callback owns the ring producer by move. No `Mutex`. (01)
 
 Fixed in #1, do not re-open:
 
@@ -42,3 +41,8 @@ Fixed with 03 slice (unique temp WAV, kill on timeout), do not re-open:
 
 - Temp WAV name is `subs-<pid>-<seq>.wav`, removed on every path. (03)
 - `whisper-cli` is killed when the STT timeout drops its future. (03)
+
+Fixed with 04 slice (non-interactive llama, kill on timeout), do not re-open:
+
+- The cleanup binary is `llama-completion -no-cnv`, so it exits after the answer instead of waiting at `>`. (04)
+- The `llama` child is killed when the cleanup timeout drops its future. (04)
