@@ -39,18 +39,31 @@ async fn main() -> Result<()> {
         bin: PathBuf::from(whisper_bin),
         model: PathBuf::from(whisper_model),
     };
-    let cleaner = cleanup::LlamaCli {
-        bin: PathBuf::from(llama_bin),
-        model: PathBuf::from(llama_model),
-    };
 
-    tokio::spawn(pipeline::run(
-        capture.audio_rx,
-        capture.sample_rate,
-        stt,
-        cleaner,
-        tx,
-    ));
+    // LLAMA_SERVER set: one warm llama-server. Unset: llama-completion per line.
+    if let Ok(server_bin) = std::env::var("LLAMA_SERVER") {
+        let cleaner =
+            cleanup::LlamaServer::spawn(&PathBuf::from(server_bin), &PathBuf::from(llama_model))?;
+        tokio::spawn(pipeline::run(
+            capture.audio_rx,
+            capture.sample_rate,
+            stt,
+            cleaner,
+            tx,
+        ));
+    } else {
+        let cleaner = cleanup::LlamaCli {
+            bin: PathBuf::from(llama_bin),
+            model: PathBuf::from(llama_model),
+        };
+        tokio::spawn(pipeline::run(
+            capture.audio_rx,
+            capture.sample_rate,
+            stt,
+            cleaner,
+            tx,
+        ));
+    }
 
     // v0 surface: terminal. The same Cue stream is what an eframe/Tauri overlay
     // and the later browser extension subscribe to.
