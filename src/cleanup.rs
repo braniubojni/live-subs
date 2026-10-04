@@ -62,11 +62,37 @@ impl Cleaner for LlamaCli {
             .find(|l| !l.is_empty())
             .unwrap_or(raw)
             .to_string();
-        Ok(if cleaned.chars().count() > raw.chars().count() * 2 {
-            // Hallucinated expansion. Keep the source line.
-            raw.to_string()
-        } else {
-            cleaned
-        })
+        Ok(accept_cleanup(raw, &cleaned))
+    }
+}
+
+/// Keep the source line when the model adds nothing, or roughly doubles it.
+/// A cleanup pass that invents a paragraph is worse than the raw subtitle.
+pub fn accept_cleanup(raw: &str, cleaned: &str) -> String {
+    let cleaned = cleaned.trim();
+    if cleaned.is_empty() || cleaned.chars().count() > raw.chars().count() * 2 {
+        raw.to_string()
+    } else {
+        cleaned.to_string()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::accept_cleanup;
+
+    #[test]
+    fn keeps_a_punctuated_line() {
+        assert_eq!(
+            accept_cleanup("um ship it friday", "Ship it Friday."),
+            "Ship it Friday."
+        );
+    }
+
+    #[test]
+    fn rejects_hallucinated_expansion() {
+        let raw = "ship it friday";
+        let invented = "We should ship it on Friday and email the whole company about the launch.";
+        assert_eq!(accept_cleanup(raw, invented), raw);
     }
 }

@@ -1,18 +1,13 @@
-//! Live subtitles.
+//! Live subtitles binary.
 //!
 //! Audio callback never transcribes. It only pushes f32 samples into a ring buffer.
 //! A worker resamples to 16 kHz mono, cuts on silence, and emits cues.
 //! Whisper and the cleanup model run on their own tasks so a slow token
 //! cannot stall capture.
 
-mod audio;
-mod cleanup;
-mod pipeline;
-mod stt;
-mod vad;
-
 use anyhow::Result;
-use pipeline::Cue;
+use live_subs::pipeline::Cue;
+use live_subs::{audio, cleanup, pipeline, stt};
 use std::path::PathBuf;
 use tracing::info;
 
@@ -26,8 +21,8 @@ async fn main() -> Result<()> {
         .init();
 
     let whisper_bin = std::env::var("WHISPER_BIN").unwrap_or_else(|_| "whisper-cli".into());
-    let whisper_model = std::env::var("WHISPER_MODEL")
-        .unwrap_or_else(|_| "models/ggml-tiny.bin".into());
+    let whisper_model =
+        std::env::var("WHISPER_MODEL").unwrap_or_else(|_| "models/ggml-tiny.bin".into());
     let llama_bin = std::env::var("LLAMA_BIN").unwrap_or_else(|_| "llama-cli".into());
     let llama_model =
         std::env::var("LLAMA_MODEL").unwrap_or_else(|_| "models/cleanup-q4.gguf".into());

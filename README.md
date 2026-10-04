@@ -2,7 +2,34 @@
 
 Local live subtitles. System audio goes in, a subtitle line comes out. Speech-to-text is [whisper.cpp](https://github.com/ggml-org/whisper.cpp). Cleanup is a tiny [llama.cpp](https://github.com/ggml-org/llama.cpp) model. Neither runs on the audio thread.
 
-This is a v0 starter. The terminal is the subtitle surface. An overlay and a browser extension subscribe to the same `Cue` stream later.
+The binary is a thin subscriber. The library crate is what tests and the later overlay import.
+
+## Package layout
+
+Follow the [Cargo package layout](https://doc.rust-lang.org/cargo/guide/project-layout.html). Do not invent a second tree.
+
+```
+.
+├── Cargo.toml
+├── Cargo.lock
+├── rustfmt.toml
+├── rust-toolchain.toml
+├── src/
+│   ├── lib.rs            # library, public API
+│   ├── main.rs           # binary only
+│   ├── audio.rs
+│   ├── vad.rs
+│   ├── stt.rs
+│   ├── cleanup.rs
+│   └── pipeline.rs
+├── tests/                # integration tests, library crate only
+│   └── segments.rs
+├── examples/             # add when a snippet is worth running alone
+├── benches/              # add when a hot path needs a number
+└── .github/workflows/ci.yml
+```
+
+`src/lib.rs` owns the modules. `src/main.rs` does not declare them again. Integration tests live in `tests/` and depend on `live_subs`, never on the binary. Extra executables go in `src/bin/`. Names of binaries, tests, and examples are kebab-case. Module names are snake_case.
 
 ## Pipeline
 
@@ -23,7 +50,7 @@ Partials are the raw Whisper line. The final cue replaces that line after cleanu
 
 ## Requirements
 
-- Rust 1.85+
+- Rust stable, with `rustfmt` and `clippy` (`rust-toolchain.toml` installs both)
 - A built `whisper-cli` from whisper.cpp
 - A built `llama-cli` from llama.cpp
 - macOS 14.6+ for output-device loopback, Windows WASAPI loopback, or a Linux monitor source
@@ -35,11 +62,8 @@ git clone git@github.com:braniubojni/live-subs.git
 cd live-subs
 
 mkdir -p models
-# whisper tiny, multilingual, ~75 MB
 curl -L -o models/ggml-tiny.bin \
   https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-tiny.bin
-
-# transcript cleanup, ~400 MB Q4. A fine-tune beats a generic chat model.
 curl -L -o models/cleanup-q4.gguf \
   https://huggingface.co/superwhisper/s1-mini-GGUF/resolve/main/s1-mini-q4_k_m.gguf
 ```
@@ -47,12 +71,10 @@ curl -L -o models/cleanup-q4.gguf \
 Build the CLIs once:
 
 ```bash
-# whisper.cpp
 git clone https://github.com/ggml-org/whisper.cpp
 cmake -S whisper.cpp -B whisper.cpp/build
 cmake --build whisper.cpp/build -j --target whisper-cli
 
-# llama.cpp
 git clone https://github.com/ggml-org/llama.cpp
 cmake -S llama.cpp -B llama.cpp/build
 cmake --build llama.cpp/build -j --target llama-cli
@@ -74,15 +96,42 @@ macOS asks for system-audio recording permission. Grant it to the terminal you l
 
 `ggml-tiny` is the right first model. Move to `ggml-base` only if names and numbers are wrong. Do not put a 7B chat model on the cleanup step. It will miss the 700 ms cap.
 
-## Layout
+## Quality bar
+
+CI on `main` and on every pull request runs three commands. All three must pass. A change that does not pass locally will not pass there.
+
+```bash
+cargo fmt --all -- --check
+cargo clippy --all-targets --all-features -- -D warnings
+cargo test --all-targets --all-features
+```
+
+Format before committing: `cargo fmt --all`. `rustfmt.toml` is the only style config. Do not hand-format around it.
+
+Lint is Clippy with warnings denied, plus the crate lints in `Cargo.toml`: `unsafe_code` is forbidden, `dbg!` / `todo!` / `unimplemented!` are denied. No `unsafe` in this crate. The audio callback stays allocation-free and must not call a model.
+
+Tests are required for behavior you can run without a microphone:
+
+- Unit tests sit next to the code, behind `#[cfg(test)]`.
+- Integration tests sit in `tests/` and use the public library API.
+- A bug fix needs a test that failed before the fix.
+- A new cut rule, cleanup rule, or cue field needs a test.
+- Device capture is not a CI test. There is no audio device on the runner.
+
+`cargo test` is the check. Do not add a test that shells out to `whisper-cli` or `llama-cli`. Those belong in a manual run.
+
+## Layout of the code
 
 | File | Job |
 | --- | --- |
+| `src/lib.rs` | Crate root. Modules live here so tests can use them. |
+| `src/main.rs` | Binary. Starts capture and prints cues. |
 | `src/audio.rs` | Loopback capture. Callback only downmixes and pushes `f32`. |
 | `src/vad.rs` | RMS gate. Swap for Silero later. The segmenter API stays. |
 | `src/stt.rs` | `whisper-cli` behind a `Transcriber` trait. |
 | `src/cleanup.rs` | `llama-cli`, temp 0, 512 context, 64 tokens. |
 | `src/pipeline.rs` | Resample, cut, emit cues. Capture never awaits a model. |
+| `tests/segments.rs` | Integration coverage of the VAD cut and the cleanup guard. |
 
 ## Next
 

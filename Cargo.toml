@@ -25,3 +25,12 @@ eframe = { version = "0.31", optional = true }
 [features]
 default = []
 overlay = ["dep:eframe"]
+
+[lints.rust]
+unsafe_code = "forbid"
+unused_must_use = "deny"
+
+[lints.clippy]
+dbg_macro = "deny"
+todo = "deny"
+unimplemented = "deny"

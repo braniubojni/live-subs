@@ -87,3 +87,42 @@ impl Segmenter {
 fn samples(rate: u32, ms: u32) -> usize {
     (rate as usize * ms as usize) / 1000
 }
+
+#[cfg(test)]
+mod tests {
+    use super::{Segmenter, VadConfig, VadEvent};
+
+    fn tone(n: usize, amp: f32) -> Vec<f32> {
+        vec![amp; n]
+    }
+
+    #[test]
+    fn silence_emits_nothing() {
+        let mut seg = Segmenter::new(16_000, VadConfig::default());
+        assert!(seg.push(&tone(16_000, 0.0)).is_none());
+    }
+
+    #[test]
+    fn short_blip_is_dropped() {
+        let mut seg = Segmenter::new(16_000, VadConfig::default());
+        assert!(matches!(seg.push(&tone(1_600, 0.2)), Some(VadEvent::Speaking)));
+        assert!(seg.push(&tone(8_000, 0.0)).is_none());
+    }
+
+    #[test]
+    fn speech_then_silence_ends_the_utterance() {
+        let mut seg = Segmenter::new(16_000, VadConfig::default());
+        assert!(matches!(seg.push(&tone(8_000, 0.2)), Some(VadEvent::Speaking)));
+        match seg.push(&tone(8_000, 0.0)) {
+            Some(VadEvent::Ended { speech }) => assert!(speech.len() > 8_000),
+            other => panic!("expected Ended, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn long_speech_is_cut_at_the_max() {
+        let mut seg = Segmenter::new(16_000, VadConfig::default());
+        let event = seg.push(&tone(16_000 * 8, 0.2));
+        assert!(matches!(event, Some(VadEvent::Ended { .. })));
+    }
+}
