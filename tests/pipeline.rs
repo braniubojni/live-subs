@@ -2,12 +2,14 @@
 //! Tokio time is paused: sleeps and timeouts advance virtually, none are real.
 
 use anyhow::Result;
-use live_subs::audio::AudioRx;
+use live_subs::audio::{AudioRx, AudioSource};
 use live_subs::cleanup::Cleaner;
 use live_subs::pipeline::{self, Cue, CueKind};
 use live_subs::stt::Transcriber;
 use ringbuf::traits::{Producer, Split};
 use ringbuf::HeapRb;
+use std::collections::VecDeque;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 use tokio::sync::mpsc;
 
@@ -116,4 +118,54 @@ async fn final_survives_full_channel() {
         cues.iter().any(|c| matches!(c.kind, CueKind::Final)),
         "final dropped: {cues:?}"
     );
+}
+
+/// Hands out one scripted chunk per `drain`, then nothing.
+struct FakeSource(VecDeque<Vec<f32>>);
+
+impl AudioSource for FakeSource {
+    fn drain(&mut self, out: &mut Vec<f32>) {
+        if let Some(chunk) = self.0.pop_front() {
+            out.extend(chunk);
+        }
+    }
+}
+
+/// Names utterances in call order. Speech here is too short for a partial.
+struct CountingStt(AtomicUsize);
+
+#[async_trait::async_trait]
+impl Transcriber for CountingStt {
+    async fn transcribe(&self, _pcm16k: &[f32]) -> Result<String> {
+        Ok(["first", "second"][self.0.fetch_add(1, Ordering::SeqCst)].into())
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn speech_silence_speech_yields_exact_cues() {
+    let n = |secs: f32| (RATE as f32 * secs) as usize;
+    // 0.4 s speech (under the partial threshold) + 0.6 s silence, twice.
+    let utterance = || vec![vec![0.2_f32; n(0.4)], vec![0.0_f32; n(0.6)]];
+    let source = FakeSource(utterance().into_iter().chain(utterance()).collect());
+    let (tx, mut rx) = mpsc::channel::<Cue>(32);
+    let task = tokio::spawn(pipeline::run(
+        source,
+        RATE,
+        CountingStt(AtomicUsize::new(0)),
+        FakeCleaner,
+        tx,
+    ));
+    let mut got = Vec::new();
+    while let Ok(Some(cue)) = tokio::time::timeout(Duration::from_secs(2), rx.recv()).await {
+        got.push((format!("{:?}", cue.kind), cue.id, cue.text));
+    }
+    task.abort();
+    let want = [
+        ("Partial", 0, "first"),
+        ("Final", 0, "FIRST"),
+        ("Partial", 1, "second"),
+        ("Final", 1, "SECOND"),
+    ]
+    .map(|(k, id, t)| (k.to_string(), id, t.to_string()));
+    assert_eq!(got, want);
 }

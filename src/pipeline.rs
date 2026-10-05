@@ -1,4 +1,4 @@
-use crate::audio::AudioRx;
+use crate::audio::AudioSource;
 use crate::cleanup::Cleaner;
 use crate::stt::{with_timeout, Transcriber};
 use crate::vad::{Segmenter, VadConfig, VadEvent};
@@ -24,13 +24,14 @@ pub struct Cue {
     pub id: u64,
 }
 
-pub async fn run<S, C>(
-    audio: AudioRx,
+pub async fn run<A, S, C>(
+    audio: A,
     in_rate: u32,
     stt: S,
     cleaner: C,
     tx: tokio::sync::mpsc::Sender<Cue>,
 ) where
+    A: AudioSource,
     S: Transcriber + 'static,
     C: Cleaner + 'static,
 {
@@ -224,8 +225,8 @@ where
     }
 }
 
-async fn worker<S, C, K>(
-    mut audio: AudioRx,
+async fn worker<A, S, C, K>(
+    mut audio: A,
     in_rate: u32,
     stt: Arc<S>,
     cleaner: Arc<C>,
@@ -233,6 +234,7 @@ async fn worker<S, C, K>(
     clock: K,
 ) -> Result<()>
 where
+    A: AudioSource,
     S: Transcriber + 'static,
     C: Cleaner + 'static,
     K: Clock,
