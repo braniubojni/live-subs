@@ -5,9 +5,11 @@ use crate::vad::{Segmenter, VadConfig, VadEvent};
 use anyhow::Result;
 use rubato::{FastFixedIn, PolynomialDegree, Resampler};
 use serde::Serialize;
+use std::collections::VecDeque;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
+use tokio::sync::oneshot;
 use tokio::time::Instant;
 
 #[derive(Debug, Clone, Copy, Serialize)]
@@ -103,6 +105,8 @@ impl Vad {
 
 const PARTIAL_EVERY: Duration = Duration::from_millis(900);
 const PARTIAL_MIN_SAMPLES: usize = 16_000 / 2;
+/// Finals allowed to reach cleanup at once. Past this, the oldest skips cleanup.
+const MAX_LIVE_FINALS: usize = 3;
 
 /// Decides when a partial transcription may start. Owns the busy flag so at
 /// most one partial runs at a time. Reads time only through `Clock`.
@@ -142,6 +146,8 @@ impl<K: Clock> PartialScheduler<K> {
     }
 }
 
+type LiveFinals = VecDeque<(u64, oneshot::Sender<()>)>;
+
 /// Owns the utterance id and emits cues from detached tasks.
 struct Finalizer<S, C> {
     stt: Arc<S>,
@@ -150,6 +156,8 @@ struct Finalizer<S, C> {
     id: u64,
     /// Count of utterances closed so far. A partial for id k is stale once this is > k.
     ended: Arc<AtomicU64>,
+    /// Finals still eligible for cleanup, oldest first. Shedding signals the front.
+    live: Arc<Mutex<LiveFinals>>,
 }
 
 impl<S, C> Finalizer<S, C>
@@ -164,6 +172,7 @@ where
             tx,
             id: 0,
             ended: Arc::new(AtomicU64::new(0)),
+            live: Arc::default(),
         }
     }
 
@@ -190,36 +199,61 @@ where
     }
 
     /// Close the current utterance and transcribe it off the capture loop.
-    /// Cleanup starts only after that line exists, and is itself capped.
+    /// Cleanup starts only after that line exists. At most `MAX_LIVE_FINALS`
+    /// finals stay eligible for cleanup; the oldest beyond that emits its raw
+    /// line as the final instead. Capture never waits.
     fn end(&mut self, speech: Vec<f32>) {
         let cue_id = self.id;
         self.id += 1;
         self.ended.store(self.id, Ordering::Release);
+        let (skip_tx, mut skip_rx) = oneshot::channel();
+        {
+            let mut live = self.live.lock().unwrap();
+            if live.len() >= MAX_LIVE_FINALS {
+                if let Some((old, skip)) = live.pop_front() {
+                    tracing::warn!(
+                        old,
+                        cue_id,
+                        "stt lagging: cleanup dropped, raw line will be the final"
+                    );
+                    let _ = skip.send(());
+                }
+            }
+            live.push_back((cue_id, skip_tx));
+        }
         let stt = self.stt.clone();
         let cleaner = self.cleaner.clone();
         let tx = self.tx.clone();
+        let live = self.live.clone();
         tokio::spawn(async move {
             let raw = with_timeout(stt.transcribe(&speech), Duration::from_secs(4))
                 .await
                 .unwrap_or_default();
-            if raw.is_empty() {
-                return;
-            }
-            let _ = tx.try_send(Cue {
-                kind: CueKind::Partial,
-                text: raw.clone(),
-                id: cue_id,
-            });
-            let text = cleaner.clean(&raw).await.unwrap_or(raw);
-            let sent = tx
-                .send(Cue {
-                    kind: CueKind::Final,
-                    text,
+            if !raw.is_empty() {
+                let _ = tx.try_send(Cue {
+                    kind: CueKind::Partial,
+                    text: raw.clone(),
                     id: cue_id,
-                })
-                .await;
-            if sent.is_err() {
-                tracing::debug!(cue_id, "cue channel closed");
+                });
+                // biased: a final already shed must not start cleanup at all.
+                let text = tokio::select! {
+                    biased;
+                    _ = &mut skip_rx => raw,
+                    cleaned = cleaner.clean(&raw) => cleaned.unwrap_or(raw),
+                };
+                live.lock().unwrap().retain(|(i, _)| *i != cue_id);
+                let sent = tx
+                    .send(Cue {
+                        kind: CueKind::Final,
+                        text,
+                        id: cue_id,
+                    })
+                    .await;
+                if sent.is_err() {
+                    tracing::debug!(cue_id, "cue channel closed");
+                }
+            } else {
+                live.lock().unwrap().retain(|(i, _)| *i != cue_id);
             }
         });
     }
