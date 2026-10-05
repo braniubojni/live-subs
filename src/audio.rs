@@ -42,9 +42,17 @@ impl AudioRx {
     pub fn dropped(&self) -> u64 {
         self.dropped.load(Ordering::Relaxed)
     }
+}
 
-    /// Non-blocking drain. Also logs ring overruns, at most once per second.
-    pub fn drain(&mut self, out: &mut Vec<f32>) {
+/// Where the pipeline reads mono samples from. Tests feed synthetic PCM.
+pub trait AudioSource {
+    /// Non-blocking: append whatever is ready to `out`, possibly nothing.
+    fn drain(&mut self, out: &mut Vec<f32>);
+}
+
+impl AudioSource for AudioRx {
+    /// Also logs ring overruns, at most once per second.
+    fn drain(&mut self, out: &mut Vec<f32>) {
         out.extend(self.cons.pop_iter());
         let dropped = self.dropped();
         if dropped > self.logged && self.last_log.elapsed() >= Duration::from_secs(1) {
