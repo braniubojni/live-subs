@@ -79,6 +79,11 @@ impl Clock for TokioClock {
     }
 }
 
+#[cfg(test)]
+thread_local! {
+    static FAIL_NEXT: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
 /// Device rate to 16 kHz mono, one 960-sample frame at a time.
 struct Resample(FastFixedIn<f32>);
 
@@ -96,6 +101,13 @@ impl Resample {
 
     /// `None` after a failure: the resampler is reset and the frame skipped.
     fn process(&mut self, frame: &[f32]) -> Option<Vec<f32>> {
+        // Test hook: a wrong-sized frame makes rubato fail for real.
+        #[cfg(test)]
+        let frame = if FAIL_NEXT.replace(false) {
+            &frame[1..]
+        } else {
+            frame
+        };
         match self.0.process(&[frame], None) {
             Ok(mut out) => Some(out.swap_remove(0)),
             Err(err) => {
@@ -451,6 +463,61 @@ mod tests {
     }
 
     const LONG: usize = PARTIAL_MIN_SAMPLES + 1;
+
+    struct OneChunk(Option<Vec<f32>>);
+
+    impl AudioSource for OneChunk {
+        fn drain(&mut self, out: &mut Vec<f32>) {
+            out.extend(self.0.take().unwrap_or_default());
+        }
+    }
+
+    struct Fixed;
+
+    #[async_trait::async_trait]
+    impl Transcriber for Fixed {
+        async fn transcribe(&self, _pcm16k: &[f32]) -> Result<String> {
+            Ok("hello".into())
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl Cleaner for Fixed {
+        async fn clean(&self, raw: &str) -> Result<String> {
+            Ok(raw.to_uppercase())
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn resample_error_skips_frame_and_worker_keeps_emitting() {
+        const RATE: usize = 48_000;
+        // First frame fails; 0.5 s speech then 0.6 s silence follow.
+        FAIL_NEXT.set(true);
+        let audio = [vec![0.2_f32; RATE / 2], vec![0.0_f32; RATE * 6 / 10]].concat();
+        let (tx, mut rx) = tokio::sync::mpsc::channel::<Cue>(32);
+        let cancel = CancellationToken::new();
+        let task = tokio::spawn(worker(
+            OneChunk(Some(audio)),
+            RATE as u32,
+            Arc::new(Fixed),
+            Arc::new(Fixed),
+            tx,
+            TokioClock,
+            cancel.clone(),
+        ));
+        let mut got = Vec::new();
+        while let Ok(Some(cue)) = tokio::time::timeout(Duration::from_secs(2), rx.recv()).await {
+            got.push((format!("{:?}", cue.kind), cue.text));
+        }
+        assert!(!FAIL_NEXT.get(), "fault was never consumed");
+        assert!(!task.is_finished(), "worker died after resample error");
+        assert_eq!(
+            got.last(),
+            Some(&("Final".to_string(), "HELLO".to_string()))
+        );
+        cancel.cancel();
+        task.await.unwrap().unwrap();
+    }
 
     fn fin(id: u64) -> Option<Cue> {
         Some(Cue {
