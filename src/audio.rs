@@ -16,7 +16,7 @@ pub struct Capture {
     pub channels: u16,
     pub audio_rx: AudioRx,
     /// Kept alive. Dropping the stream stops capture.
-    _stream: Stream,
+    pub stream: Stream,
 }
 
 pub struct AudioRx {
@@ -155,7 +155,7 @@ pub fn start_loopback() -> Result<Capture> {
         sample_rate,
         channels,
         audio_rx: AudioRx::new(cons, dropped),
-        _stream: stream,
+        stream,
     })
 }
 

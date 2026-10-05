@@ -9,6 +9,7 @@ use anyhow::Result;
 use live_subs::pipeline::Cue;
 use live_subs::{audio, cleanup, pipeline, stt};
 use std::path::PathBuf;
+use tokio_util::sync::CancellationToken;
 use tracing::info;
 
 #[tokio::main]
@@ -32,6 +33,7 @@ async fn main() -> Result<()> {
 
     let (tx, mut rx) = tokio::sync::mpsc::channel::<Cue>(32);
 
+    let cancel = CancellationToken::new();
     let capture = audio::start_loopback()?;
     info!(device = %capture.device_name, rate = capture.sample_rate, "capture started");
 
@@ -50,6 +52,7 @@ async fn main() -> Result<()> {
             stt,
             cleaner,
             tx,
+            cancel.clone(),
         ));
     } else {
         let cleaner = cleanup::LlamaCli {
@@ -62,12 +65,31 @@ async fn main() -> Result<()> {
             stt,
             cleaner,
             tx,
+            cancel.clone(),
         ));
     }
 
     // v0 surface: terminal. The same Cue stream is what an eframe/Tauri overlay
     // and the later browser extension subscribe to.
-    while let Some(cue) = rx.recv().await {
+    // Ctrl-C: cancel the pipeline and stop capture. It flushes any open
+    // utterance as a final, then the channel closes and the loop ends. A second
+    // Ctrl-C quits at once.
+    let mut stream = Some(capture.stream);
+    loop {
+        let cue = tokio::select! {
+            cue = rx.recv() => match cue {
+                Some(cue) => cue,
+                None => break,
+            },
+            _ = tokio::signal::ctrl_c() => {
+                if cancel.is_cancelled() {
+                    break;
+                }
+                cancel.cancel();
+                stream = None;
+                continue;
+            }
+        };
         match cue.kind {
             pipeline::CueKind::Partial => {
                 eprint!("\r\x1b[2K{}", cue.text);
@@ -77,5 +99,6 @@ async fn main() -> Result<()> {
             }
         }
     }
+    drop(stream);
     Ok(())
 }

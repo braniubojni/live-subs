@@ -13,6 +13,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::mpsc;
+use tokio_util::sync::CancellationToken;
 
 const RATE: u32 = 48_000;
 
@@ -65,6 +66,7 @@ async fn collect(
         FakeStt { partial_delay },
         FakeCleaner,
         tx,
+        CancellationToken::new(),
     ));
     let mut cues = Vec::new();
     while let Ok(Some(cue)) = tokio::time::timeout(idle, rx.recv()).await {
@@ -155,6 +157,7 @@ async fn speech_silence_speech_yields_exact_cues() {
         CountingStt(AtomicUsize::new(0)),
         FakeCleaner,
         tx,
+        CancellationToken::new(),
     ));
     let mut got = Vec::new();
     while let Ok(Some(cue)) = tokio::time::timeout(Duration::from_secs(2), rx.recv()).await {
@@ -231,6 +234,7 @@ async fn slow_stt_sheds_oldest_cleanups_and_never_blocks_capture() {
         SlowStt,
         cleaner,
         tx,
+        CancellationToken::new(),
     ));
 
     // STT is still busy at 1 s, yet capture has drained everything.
@@ -286,6 +290,7 @@ async fn finals_come_out_in_utterance_order() {
         InvertedStt(AtomicUsize::new(0)),
         FakeCleaner,
         tx,
+        CancellationToken::new(),
     ));
     let ids = |rx: &mut mpsc::Receiver<Cue>| {
         let mut out = Vec::new();
@@ -317,6 +322,7 @@ async fn cues_carry_run_relative_timing_and_raw_on_finals() {
         CountingStt(AtomicUsize::new(0)),
         FakeCleaner,
         tx,
+        CancellationToken::new(),
     ));
     let mut got = Vec::new();
     while let Ok(Some(cue)) = tokio::time::timeout(Duration::from_secs(2), rx.recv()).await {
@@ -342,4 +348,32 @@ async fn cues_carry_run_relative_timing_and_raw_on_finals() {
         assert_eq!(cue.raw.as_deref(), raw);
         assert_eq!(cue.lang, None);
     }
+}
+
+#[tokio::test(start_paused = true)]
+async fn cancel_mid_speech_flushes_one_final() {
+    let n = |secs: f32| (RATE as f32 * secs) as usize;
+    // 0.4 s of speech and no closing silence: the VAD never ends it.
+    let source = FakeSource([vec![0.2_f32; n(0.4)]].into());
+    let (tx, mut rx) = mpsc::channel::<Cue>(32);
+    let cancel = CancellationToken::new();
+    let task = tokio::spawn(pipeline::run(
+        source,
+        RATE,
+        CountingStt(AtomicUsize::new(0)),
+        FakeCleaner,
+        tx,
+        cancel.clone(),
+    ));
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    assert!(rx.try_recv().is_err(), "nothing before cancel");
+    cancel.cancel();
+    // The channel closes by itself once the flushed final is sent.
+    let mut got = Vec::new();
+    while let Some(cue) = rx.recv().await {
+        got.push((format!("{:?}", cue.kind), cue.id, cue.text));
+    }
+    task.await.unwrap();
+    let finals: Vec<_> = got.iter().filter(|c| c.0 == "Final").collect();
+    assert_eq!(finals, [&("Final".to_string(), 0, "FIRST".to_string())]);
 }

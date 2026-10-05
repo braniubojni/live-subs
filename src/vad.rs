@@ -84,6 +84,15 @@ impl Segmenter {
         &self.speech
     }
 
+    /// Close an utterance still open (shutdown). Same min-speech rule as `push`.
+    pub fn flush(&mut self) -> Option<Vec<f32>> {
+        let long_enough = self.voiced_samples >= samples(self.sample_rate, self.cfg.min_speech_ms);
+        match self.take_end() {
+            VadEvent::Ended { speech } if long_enough => Some(speech),
+            _ => None,
+        }
+    }
+
     fn take_end(&mut self) -> VadEvent {
         let speech = std::mem::take(&mut self.speech);
         self.in_speech = false;
