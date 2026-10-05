@@ -14,7 +14,7 @@ ringbuf = "0.4"
 rubato = "0.16"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time", "io-util", "net", "process"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time", "io-util", "net", "process", "signal"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
@@ -22,6 +22,7 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 # eframe pulls wgpu; skip it until the pipeline is proven in the terminal.
 eframe = { version = "0.31", optional = true }
 dotenvy = "0.15.7"
+tokio-util = { version = "0.7", default-features = false }
 
 [features]
 default = []

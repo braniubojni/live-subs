@@ -11,6 +11,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tokio::sync::oneshot;
 use tokio::time::Instant;
+use tokio_util::sync::CancellationToken;
 
 #[derive(Debug, Clone, Copy, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -51,6 +52,7 @@ pub async fn run<A, S, C>(
     stt: S,
     cleaner: C,
     tx: tokio::sync::mpsc::Sender<Cue>,
+    cancel: CancellationToken,
 ) where
     A: AudioSource,
     S: Transcriber + 'static,
@@ -58,7 +60,7 @@ pub async fn run<A, S, C>(
 {
     let stt = Arc::new(stt);
     let cleaner = Arc::new(cleaner);
-    if let Err(err) = worker(audio, in_rate, stt, cleaner, tx, TokioClock).await {
+    if let Err(err) = worker(audio, in_rate, stt, cleaner, tx, TokioClock, cancel).await {
         tracing::error!(?err, "pipeline stopped");
     }
 }
@@ -119,6 +121,10 @@ impl Vad {
 
     fn speech(&self) -> &[f32] {
         self.0.speech()
+    }
+
+    fn flush(&mut self) -> Option<Vec<f32>> {
+        self.0.flush()
     }
 }
 
@@ -335,6 +341,7 @@ async fn worker<A, S, C, K>(
     cleaner: Arc<C>,
     tx: tokio::sync::mpsc::Sender<Cue>,
     clock: K,
+    cancel: CancellationToken,
 ) -> Result<()>
 where
     A: AudioSource,
@@ -352,11 +359,14 @@ where
     // sample-counted, so it does not depend on wall time or resampler output.
     let mut consumed: u64 = 0;
 
-    loop {
+    while !cancel.is_cancelled() {
         let mut chunk = Vec::new();
         audio.drain(&mut chunk);
         if chunk.is_empty() {
-            tokio::time::sleep(Duration::from_millis(10)).await;
+            tokio::select! {
+                _ = cancel.cancelled() => {}
+                _ = tokio::time::sleep(Duration::from_millis(10)) => {}
+            }
             continue;
         }
         pending.extend(chunk);
@@ -367,27 +377,38 @@ where
             let Some(mono) = resample.process(&frame) else {
                 continue;
             };
-            let end_ms = consumed * 1000 / in_rate as u64;
-            let span = |samples: usize| Span {
-                start_ms: end_ms.saturating_sub(samples as u64 * 1000 / 16_000),
-                end_ms,
-            };
             match vad.push(&mono) {
                 Some(VadEvent::Speaking) => {
                     if let Some(busy) = partials.try_fire(vad.speech().len()) {
                         let speech = vad.speech().to_vec();
-                        let span = span(speech.len());
+                        let span = span_at(consumed, in_rate, speech.len());
                         finals.spawn_partial(speech, span, busy);
                     }
                 }
                 Some(VadEvent::Ended { speech }) => {
-                    let span = span(speech.len());
+                    let span = span_at(consumed, in_rate, speech.len());
                     finals.end(speech, span);
                     partials.reset();
                 }
                 None => {}
             }
         }
+    }
+    // Cancelled: an open utterance becomes one last final. The detached final
+    // task holds its own `tx`, so the channel closes once it has sent.
+    if let Some(speech) = vad.flush() {
+        let span = span_at(consumed, in_rate, speech.len());
+        finals.end(speech, span);
+    }
+    Ok(())
+}
+
+/// Position of a segment of `samples` 16 kHz samples ending after `consumed` input samples.
+fn span_at(consumed: u64, in_rate: u32, samples: usize) -> Span {
+    let end_ms = consumed * 1000 / in_rate as u64;
+    Span {
+        start_ms: end_ms.saturating_sub(samples as u64 * 1000 / 16_000),
+        end_ms,
     }
 }
 
