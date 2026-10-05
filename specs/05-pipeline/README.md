@@ -48,7 +48,7 @@ Fixed in #1. Kept here so the tests stay the regression net.
 ## Tests
 Today: four `PartialScheduler` unit tests in `src/pipeline.rs` with a fake clock, and three tests in `tests/pipeline.rs` with inline `FakeStt` / `FakeCleaner` and a pre-filled ring. Integration tests run on paused tokio time, so no real sleeps. Whisper and llama are never run.
 
-Still to add, once the stages split: `tests/common/` with `FakeSource`, `FakeStt`, `FakeCleaner`, paused tokio time (already used above). Assertions on an ordered `Vec<Cue>`.
+Still to add (with `AudioSource`): `tests/common/` with `FakeSource`, `FakeStt`, `FakeCleaner`, paused tokio time (already used above). Assertions on an ordered `Vec<Cue>`.
 
 ## Out of scope
 Multi-stream mixing. Persisting transcripts.
