@@ -1,4 +1,5 @@
 //! Pipeline end to end with fake STT and cleanup. No audio device, no models.
+//! Tokio time is paused: sleeps and timeouts advance virtually, none are real.
 
 use anyhow::Result;
 use live_subs::audio::AudioRx;
@@ -73,7 +74,7 @@ async fn collect(
     cues
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn partial_and_final_share_an_id() {
     let cues = collect(Duration::ZERO, 32, None, Duration::from_millis(1500)).await;
     assert!(cues.iter().any(|c| matches!(c.kind, CueKind::Final)));
@@ -81,7 +82,7 @@ async fn partial_and_final_share_an_id() {
     assert!(cues.iter().all(|c| c.id == first), "ids differ: {cues:?}");
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn late_partial_never_follows_final() {
     let cues = collect(
         Duration::from_millis(1200),
@@ -102,7 +103,7 @@ async fn late_partial_never_follows_final() {
     );
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn final_survives_full_channel() {
     let cues = collect(
         Duration::ZERO,
