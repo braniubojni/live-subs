@@ -10,6 +10,7 @@ use ringbuf::traits::{Producer, Split};
 use ringbuf::HeapRb;
 use std::collections::VecDeque;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::mpsc;
 
@@ -168,4 +169,93 @@ async fn speech_silence_speech_yields_exact_cues() {
     ]
     .map(|(k, id, t)| (k.to_string(), id, t.to_string()));
     assert_eq!(got, want);
+}
+
+/// Every call takes 3 s of virtual time, under the 4 s STT timeout.
+struct SlowStt;
+
+#[async_trait::async_trait]
+impl Transcriber for SlowStt {
+    async fn transcribe(&self, _pcm16k: &[f32]) -> Result<String> {
+        tokio::time::sleep(Duration::from_secs(3)).await;
+        Ok("hello".into())
+    }
+}
+
+/// Tracks how many cleanups run at once.
+struct GaugedCleaner {
+    now: AtomicUsize,
+    max: Arc<AtomicUsize>,
+}
+
+#[async_trait::async_trait]
+impl Cleaner for GaugedCleaner {
+    async fn clean(&self, raw: &str) -> Result<String> {
+        let n = self.now.fetch_add(1, Ordering::SeqCst) + 1;
+        self.max.fetch_max(n, Ordering::SeqCst);
+        tokio::time::sleep(Duration::from_secs(1)).await;
+        self.now.fetch_sub(1, Ordering::SeqCst);
+        Ok(raw.to_uppercase())
+    }
+}
+
+/// Like `FakeSource`, but exposes how many chunks are still undrained.
+struct CountedSource(VecDeque<Vec<f32>>, Arc<AtomicUsize>);
+
+impl AudioSource for CountedSource {
+    fn drain(&mut self, out: &mut Vec<f32>) {
+        if let Some(chunk) = self.0.pop_front() {
+            out.extend(chunk);
+        }
+        self.1.store(self.0.len(), Ordering::SeqCst);
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn slow_stt_sheds_oldest_cleanups_and_never_blocks_capture() {
+    let n = |secs: f32| (RATE as f32 * secs) as usize;
+    // Six utterances, each too short for a partial. All end at virtual t=0.
+    let chunks: VecDeque<_> = (0..6)
+        .flat_map(|_| [vec![0.2_f32; n(0.4)], vec![0.0_f32; n(0.6)]])
+        .collect();
+    let left = Arc::new(AtomicUsize::new(chunks.len()));
+    let max = Arc::new(AtomicUsize::new(0));
+    let cleaner = GaugedCleaner {
+        now: AtomicUsize::new(0),
+        max: max.clone(),
+    };
+    let (tx, mut rx) = mpsc::channel::<Cue>(32);
+    let task = tokio::spawn(pipeline::run(
+        CountedSource(chunks, left.clone()),
+        RATE,
+        SlowStt,
+        cleaner,
+        tx,
+    ));
+
+    // STT is still busy at 1 s, yet capture has drained everything.
+    tokio::time::sleep(Duration::from_secs(1)).await;
+    assert_eq!(left.load(Ordering::SeqCst), 0, "capture stuck");
+    assert!(rx.try_recv().is_err(), "no cue before STT finishes");
+
+    let mut finals = Vec::new();
+    while let Ok(Some(cue)) = tokio::time::timeout(Duration::from_secs(10), rx.recv()).await {
+        if matches!(cue.kind, CueKind::Final) {
+            finals.push((cue.id, cue.text));
+        }
+    }
+    task.abort();
+    finals.sort();
+    assert!(max.load(Ordering::SeqCst) <= 3, "cap broken");
+    // Oldest three lose cleanup and emit the raw line; newest three are cleaned.
+    let want = [
+        (0, "hello"),
+        (1, "hello"),
+        (2, "hello"),
+        (3, "HELLO"),
+        (4, "HELLO"),
+        (5, "HELLO"),
+    ]
+    .map(|(id, t)| (id, t.to_string()));
+    assert_eq!(finals, want);
 }
