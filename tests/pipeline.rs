@@ -259,3 +259,47 @@ async fn slow_stt_sheds_oldest_cleanups_and_never_blocks_capture() {
     .map(|(id, t)| (id, t.to_string()));
     assert_eq!(finals, want);
 }
+
+/// Utterance 3 is slow, the rest instant: 4 finishes STT first.
+struct InvertedStt(AtomicUsize);
+
+#[async_trait::async_trait]
+impl Transcriber for InvertedStt {
+    async fn transcribe(&self, _pcm16k: &[f32]) -> Result<String> {
+        if self.0.fetch_add(1, Ordering::SeqCst) == 3 {
+            tokio::time::sleep(Duration::from_secs(3)).await;
+        }
+        Ok("hello".into())
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn finals_come_out_in_utterance_order() {
+    let n = |secs: f32| (RATE as f32 * secs) as usize;
+    let chunks: VecDeque<_> = (0..5)
+        .flat_map(|_| [vec![0.2_f32; n(0.4)], vec![0.0_f32; n(0.6)]])
+        .collect();
+    let (tx, mut rx) = mpsc::channel::<Cue>(32);
+    let task = tokio::spawn(pipeline::run(
+        FakeSource(chunks),
+        RATE,
+        InvertedStt(AtomicUsize::new(0)),
+        FakeCleaner,
+        tx,
+    ));
+    let ids = |rx: &mut mpsc::Receiver<Cue>| {
+        let mut out = Vec::new();
+        while let Ok(cue) = rx.try_recv() {
+            if matches!(cue.kind, CueKind::Final) {
+                out.push(cue.id);
+            }
+        }
+        out
+    };
+    // 4 is done at t=0 but must wait for 3.
+    tokio::time::sleep(Duration::from_secs(1)).await;
+    assert_eq!(ids(&mut rx), [0, 1, 2]);
+    tokio::time::sleep(Duration::from_secs(5)).await;
+    task.abort();
+    assert_eq!(ids(&mut rx), [3, 4]);
+}

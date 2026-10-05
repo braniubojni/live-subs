@@ -5,7 +5,7 @@ use crate::vad::{Segmenter, VadConfig, VadEvent};
 use anyhow::Result;
 use rubato::{FastFixedIn, PolynomialDegree, Resampler};
 use serde::Serialize;
-use std::collections::VecDeque;
+use std::collections::{BTreeMap, VecDeque};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -148,6 +148,43 @@ impl<K: Clock> PartialScheduler<K> {
 
 type LiveFinals = VecDeque<(u64, oneshot::Sender<()>)>;
 
+/// Holds finished finals until every lower id has been sent. An utterance with
+/// no final (empty STT) still releases its slot with `None`.
+#[derive(Default)]
+struct Reorder {
+    next: u64,
+    held: BTreeMap<u64, Option<Cue>>,
+}
+
+impl Reorder {
+    /// Record `id` as done and return the finals now sendable, in id order.
+    fn release(&mut self, id: u64, cue: Option<Cue>) -> Vec<Cue> {
+        self.held.insert(id, cue);
+        let mut ready = Vec::new();
+        while let Some(slot) = self.held.remove(&self.next) {
+            self.next += 1;
+            ready.extend(slot);
+        }
+        ready
+    }
+}
+
+/// Sends finals in id order. The async lock is held across `send`, so a full
+/// channel stalls only other finishing tasks, never the capture loop.
+async fn emit_final(
+    order: &tokio::sync::Mutex<Reorder>,
+    tx: &tokio::sync::mpsc::Sender<Cue>,
+    id: u64,
+    cue: Option<Cue>,
+) {
+    let mut order = order.lock().await;
+    for cue in order.release(id, cue) {
+        if tx.send(cue).await.is_err() {
+            tracing::debug!(id, "cue channel closed");
+        }
+    }
+}
+
 /// Owns the utterance id and emits cues from detached tasks.
 struct Finalizer<S, C> {
     stt: Arc<S>,
@@ -158,6 +195,8 @@ struct Finalizer<S, C> {
     ended: Arc<AtomicU64>,
     /// Finals still eligible for cleanup, oldest first. Shedding signals the front.
     live: Arc<Mutex<LiveFinals>>,
+    /// Reorder buffer: finals leave in utterance-id order.
+    order: Arc<tokio::sync::Mutex<Reorder>>,
 }
 
 impl<S, C> Finalizer<S, C>
@@ -173,6 +212,7 @@ where
             id: 0,
             ended: Arc::new(AtomicU64::new(0)),
             live: Arc::default(),
+            order: Arc::default(),
         }
     }
 
@@ -225,6 +265,7 @@ where
         let cleaner = self.cleaner.clone();
         let tx = self.tx.clone();
         let live = self.live.clone();
+        let order = self.order.clone();
         tokio::spawn(async move {
             let raw = with_timeout(stt.transcribe(&speech), Duration::from_secs(4))
                 .await
@@ -242,18 +283,15 @@ where
                     cleaned = cleaner.clean(&raw) => cleaned.unwrap_or(raw),
                 };
                 live.lock().unwrap().retain(|(i, _)| *i != cue_id);
-                let sent = tx
-                    .send(Cue {
-                        kind: CueKind::Final,
-                        text,
-                        id: cue_id,
-                    })
-                    .await;
-                if sent.is_err() {
-                    tracing::debug!(cue_id, "cue channel closed");
-                }
+                let cue = Cue {
+                    kind: CueKind::Final,
+                    text,
+                    id: cue_id,
+                };
+                emit_final(&order, &tx, cue_id, Some(cue)).await;
             } else {
                 live.lock().unwrap().retain(|(i, _)| *i != cue_id);
+                emit_final(&order, &tx, cue_id, None).await;
             }
         });
     }
@@ -335,6 +373,24 @@ mod tests {
     }
 
     const LONG: usize = PARTIAL_MIN_SAMPLES + 1;
+
+    fn fin(id: u64) -> Option<Cue> {
+        Some(Cue {
+            kind: CueKind::Final,
+            text: String::new(),
+            id,
+        })
+    }
+
+    #[test]
+    fn reorder_holds_until_lower_ids_arrive() {
+        let ids = |v: Vec<Cue>| v.iter().map(|c| c.id).collect::<Vec<_>>();
+        let mut r = Reorder::default();
+        assert!(r.release(1, fin(1)).is_empty());
+        assert_eq!(ids(r.release(0, fin(0))), [0, 1]);
+        assert!(r.release(3, fin(3)).is_empty());
+        assert!(ids(r.release(2, None)).eq(&[3]), "None frees the slot");
+    }
 
     #[test]
     fn first_partial_fires_immediately_once_speech_is_long_enough() {
