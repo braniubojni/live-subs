@@ -295,10 +295,12 @@ where
         let tx = self.tx.clone();
         let live = self.live.clone();
         let order = self.order.clone();
+        let ended_at = Instant::now();
         tokio::spawn(async move {
             let raw = with_timeout(stt.transcribe(&speech), Duration::from_secs(4))
                 .await
                 .unwrap_or_default();
+            let stt_done = Instant::now();
             if !raw.is_empty() {
                 let _ = tx.try_send(Cue {
                     kind: CueKind::Partial,
@@ -310,11 +312,21 @@ where
                     raw: None,
                 });
                 // biased: a final already shed must not start cleanup at all.
-                let text = tokio::select! {
+                let (text, cleanup) = tokio::select! {
                     biased;
-                    _ = &mut skip_rx => raw.clone(),
-                    cleaned = cleaner.clean(&raw) => cleaned.unwrap_or_else(|_| raw.clone()),
+                    _ = &mut skip_rx => (raw.clone(), Duration::ZERO),
+                    cleaned = cleaner.clean(&raw) => {
+                        (cleaned.unwrap_or_else(|_| raw.clone()), stt_done.elapsed())
+                    }
                 };
+                // One line per final, logged before the reorder wait so that
+                // queueing behind an older utterance is not counted.
+                tracing::info!(
+                    id = cue_id,
+                    stt_ms = (stt_done - ended_at).as_millis() as u64,
+                    cleanup_ms = cleanup.as_millis() as u64,
+                    "final timing"
+                );
                 live.lock().unwrap().retain(|(i, _)| *i != cue_id);
                 let cue = Cue {
                     kind: CueKind::Final,
