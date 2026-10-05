@@ -4,7 +4,22 @@
 A browser extension draws the subtitle line over the page. It does not run any model. It reads cues from the local binary over `127.0.0.1`.
 
 ## Current state
-Nothing. `Cue` already derives `Serialize` in [src/pipeline.rs](../../src/pipeline.rs).
+Nothing built. `Cue` already derives `Serialize` in [src/pipeline.rs](../../src/pipeline.rs); its JSON is fixed by the snapshot test `cue_json_snapshot`.
+
+### Cue fields
+One JSON object per cue, snake_case keys:
+
+| Field | Type | Present | Meaning |
+|-------|------|---------|---------|
+| `kind` | `"partial"` \| `"final"` | always | A final replaces the partials with the same `id`. |
+| `text` | string | always | Subtitle line. On a final, the cleaned line (the raw line if cleanup was shed or failed). |
+| `id` | u64 | always | Utterance id. Partials and the final of one utterance share it. |
+| `start_ms` | u64 | always | Utterance start, ms from run start. |
+| `end_ms` | u64 | always | Partial: current position. Final: end of the VAD segment, trailing silence included. Run-relative, not wall-clock. |
+| `lang` | string | when known | Language code. Omitted otherwise; the backend does not report it yet, so today it is never sent. |
+| `raw` | string | finals only | STT line before cleanup, for debugging. Do not render it. |
+
+`lang` and `raw` are omitted, never `null`. Clients must ignore unknown fields. Finals arrive in `id` order; partials are not reordered.
 
 ## Todo
 - [ ] **Local server in the library.** `src/server.rs` behind feature `server`: WebSocket (`tokio-tungstenite`) on `127.0.0.1:<port>` pushing each `Cue` as a JSON text frame. Bind loopback only. Accept: test connects a client, sends cues through a broadcast channel, reads them back.
