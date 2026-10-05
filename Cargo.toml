@@ -35,3 +35,6 @@ unused_must_use = "deny"
 dbg_macro = "deny"
 todo = "deny"
 unimplemented = "deny"
+
+[dev-dependencies]
+tokio = { version = "1", features = ["test-util"] }

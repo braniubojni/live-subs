@@ -4,7 +4,14 @@
 Resample, cut, transcribe, clean, emit `Cue`s with stable ids and strict per-utterance ordering. Testable end to end with fakes and no audio device.
 
 ## Current state
-[src/pipeline.rs](../../src/pipeline.rs) is still one `worker` loop: drain, resample, VAD, partial scheduling, final scheduling. Detached `tokio::spawn` tasks send cues.
+[src/pipeline.rs](../../src/pipeline.rs) is split into four stages that `worker` wires in a short loop: drain, then per 960-sample frame `Resample` -> `Vad` -> `PartialScheduler` / `Finalizer`.
+
+- `Resample`: device rate to 16 kHz. On error it resets and returns `None`; the frame is skipped.
+- `Vad`: thin wrapper over `Segmenter`.
+- `PartialScheduler`: decides when a partial may start (900 ms since the last partial or final, more than 0.5 s of speech, none already running). It owns the busy flag and reads time only through the `Clock` trait. It spawns nothing.
+- `Finalizer`: owns the utterance id and the `ended` counter, and spawns the detached partial and final tasks that send cues.
+
+`Clock` is a one-method trait. `TokioClock` uses `tokio::time::Instant`, so it follows `tokio::time::pause`. `run` always uses `TokioClock`; only the scheduler unit tests inject a fake.
 
 Landed in #1:
 
@@ -14,7 +21,7 @@ Landed in #1:
 - Partials use `try_send`. Finals use `send`. A closed channel is logged.
 - A resample error resets the resampler and skips the frame. That path has no test.
 
-Fakes live inline in [tests/pipeline.rs](../../tests/pipeline.rs), not in `tests/common/`. The clock is `Instant::now()`.
+Fakes live inline in [tests/pipeline.rs](../../tests/pipeline.rs), not in `tests/common/`.
 
 ## Bugs to fix first
 Fixed in #1. Kept here so the tests stay the regression net.
@@ -27,8 +34,8 @@ Fixed in #1. Kept here so the tests stay the regression net.
 ## Todo
 - [x] **Fix the four bugs above**, each with a failing test first. (Tests in `tests/pipeline.rs`; the channel-policy test passed before the fix and guards regression. Resampler-reset path has no test.)
 - [x] **Rate from capture** (see [01](../01-capture/README.md)). Remove `SUBS_RATE`.
-- [ ] **Split `worker`.** Pure stages: `Resample`, `Vad`, `PartialScheduler` (decides when to fire, given elapsed and speech length), `Finalizer`. Accept: `worker` is a short loop wiring stages; scheduler is unit-tested with a fake clock.
-- [ ] **Injectable clock.** `Instant::now()` behind a small trait or `tokio::time::pause` in tests. Accept: no real sleeps in pipeline tests.
+- [x] **Split `worker`.** Pure stages: `Resample`, `Vad`, `PartialScheduler` (decides when to fire, given elapsed and speech length), `Finalizer`. Accept: `worker` is a short loop wiring stages; scheduler is unit-tested with a fake clock.
+- [x] **Injectable clock.** `Instant::now()` behind a small trait or `tokio::time::pause` in tests. Accept: no real sleeps in pipeline tests. (Scheduler tests use a fake `Clock`; integration tests use `#[tokio::test(start_paused = true)]`, which needs tokio `test-util` as a dev-dependency.)
 - [ ] **Input as a trait.** `AudioSource { fn drain(&mut self, out:&mut Vec<f32>) }` so tests feed synthetic PCM. Accept: integration test runs speech/silence/speech through fake STT and fake cleaner and asserts the exact cue sequence.
 - [ ] **Backpressure limits.** Cap in-flight finals (e.g. 3). If STT is slower than speech, drop oldest queued final's cleanup, never capture. Log lag. Accept: test with a slow fake STT.
 - [ ] **Ordering of finals.** Finals emitted in utterance order even if utterance 4 finishes before 3 (reorder buffer keyed by id). Accept: test with inverted delays.
@@ -39,9 +46,9 @@ Fixed in #1. Kept here so the tests stay the regression net.
 - [ ] **Resampler reset test.** Feed a frame that makes `process` fail, assert the worker is still running and later frames still emit. Accept: one test, no device.
 
 ## Tests
-Today: three tests in `tests/pipeline.rs` with inline `FakeStt` / `FakeCleaner` and a pre-filled ring. They use real sleeps.
+Today: four `PartialScheduler` unit tests in `src/pipeline.rs` with a fake clock, and three tests in `tests/pipeline.rs` with inline `FakeStt` / `FakeCleaner` and a pre-filled ring. Integration tests run on paused tokio time, so no real sleeps. Whisper and llama are never run.
 
-Still to add, once the stages split: `tests/common/` with `FakeSource`, `FakeStt`, `FakeCleaner`, paused tokio time. Assertions on an ordered `Vec<Cue>`.
+Still to add, once the stages split: `tests/common/` with `FakeSource`, `FakeStt`, `FakeCleaner`, paused tokio time (already used above). Assertions on an ordered `Vec<Cue>`.
 
 ## Out of scope
 Multi-stream mixing. Persisting transcripts.
