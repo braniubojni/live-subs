@@ -347,6 +347,7 @@ where
     let mut partials = PartialScheduler::new(clock);
     let mut finals = Finalizer::new(stt, cleaner, tx);
     let mut pending: Vec<f32> = Vec::new();
+    let mut frame: Vec<f32> = Vec::with_capacity(960);
     // Input samples consumed, skipped frames included. The run timeline is
     // sample-counted, so it does not depend on wall time or resampler output.
     let mut consumed: u64 = 0;
@@ -360,7 +361,8 @@ where
         }
         pending.extend(chunk);
         while pending.len() >= 960 {
-            let frame: Vec<f32> = pending.drain(..960).collect();
+            frame.clear();
+            frame.extend(pending.drain(..960));
             consumed += 960;
             let Some(mono) = resample.process(&frame) else {
                 continue;

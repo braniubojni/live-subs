@@ -4,7 +4,7 @@
 Resample, cut, transcribe, clean, emit `Cue`s with stable ids and strict per-utterance ordering. Testable end to end with fakes and no audio device.
 
 ## Current state
-[src/pipeline.rs](../../src/pipeline.rs) is split into four stages that `worker` wires in a short loop: drain an `AudioSource`, then per 960-sample frame `Resample` -> `Vad` -> `PartialScheduler` / `Finalizer`.
+[src/pipeline.rs](../../src/pipeline.rs) is split into four stages that `worker` wires in a short loop: drain an `AudioSource`, then per 960-sample frame (copied into one reused buffer, no per-frame allocation) `Resample` -> `Vad` -> `PartialScheduler` / `Finalizer`.
 
 - `Resample`: device rate to 16 kHz. On error it resets and returns `None`; the frame is skipped.
 - `Vad`: thin wrapper over `Segmenter`.
@@ -52,7 +52,7 @@ Fixed in #1. Kept here so the tests stay the regression net.
 - [x] **Backpressure limits.** Cap in-flight finals (e.g. 3). If STT is slower than speech, drop oldest queued final's cleanup, never capture. Log lag. Accept: test with a slow fake STT. (Cap is 3 finals eligible for cleanup. The 4th ender sheds the oldest: its final is the raw STT line, and a `warn` names the shed id. Shed tasks still finish STT, so STT tasks are not themselves capped. Test: `slow_stt_sheds_oldest_cleanups_and_never_blocks_capture`.)
 - [x] **Ordering of finals.** Finals emitted in utterance order even if utterance 4 finishes before 3 (reorder buffer keyed by id). Accept: test with inverted delays. (`Reorder` holds finished finals in a `BTreeMap` until every lower id is sent; an utterance with no final releases its slot empty. Test: `finals_come_out_in_utterance_order`, plus a `Reorder` unit test.)
 - [x] **Cue schema.** Add `start_ms`, `end_ms` (relative to run start), `lang` when known, `raw` text on finals (for debugging). Bump nothing silently: add fields, document in [08](../08-browser-extension/README.md). Accept: serde snapshot test. (`lang` is never set yet: no STT reports it. Tests: `cue_json_snapshot`, `cues_carry_run_relative_timing_and_raw_on_finals`.)
-- [ ] **Allocation in the loop.** `pending.drain(..960).collect()` allocates per frame. Reuse a frame buffer. Accept: no `collect` in the hot loop.
+- [x] **Allocation in the loop.** `pending.drain(..960).collect()` allocates per frame. Reuse a frame buffer. Accept: no `collect` in the hot loop. (`worker` keeps one 960-capacity `frame` Vec, clears it and refills from `pending.drain(..960)`; the tail stays in `pending`. Covered by the existing pipeline tests.)
 - [ ] **Graceful shutdown.** Ctrl-C stops capture, flushes the current utterance as a final, then exits. Accept: manual check plus a test using a cancellation token.
 - [ ] **Metrics.** Per-stage latency (vad end to STT done, STT to cleanup done) via `tracing` spans. Accept: one log line per final with both numbers.
 - [ ] **Resampler reset test.** Feed a frame that makes `process` fail, assert the worker is still running and later frames still emit. Accept: one test, no device.
