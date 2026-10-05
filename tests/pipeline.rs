@@ -303,3 +303,43 @@ async fn finals_come_out_in_utterance_order() {
     task.abort();
     assert_eq!(ids(&mut rx), [3, 4]);
 }
+
+#[tokio::test(start_paused = true)]
+async fn cues_carry_run_relative_timing_and_raw_on_finals() {
+    let n = |secs: f32| (RATE as f32 * secs) as usize;
+    // Same script as the exact-cue test: 0.4 s speech + 0.6 s silence, twice.
+    let utterance = || vec![vec![0.2_f32; n(0.4)], vec![0.0_f32; n(0.6)]];
+    let source = FakeSource(utterance().into_iter().chain(utterance()).collect());
+    let (tx, mut rx) = mpsc::channel::<Cue>(32);
+    let task = tokio::spawn(pipeline::run(
+        source,
+        RATE,
+        CountingStt(AtomicUsize::new(0)),
+        FakeCleaner,
+        tx,
+    ));
+    let mut got = Vec::new();
+    while let Ok(Some(cue)) = tokio::time::timeout(Duration::from_secs(2), rx.recv()).await {
+        got.push(cue);
+    }
+    task.abort();
+    // VAD closes 0.5 s after speech stops, so each segment is ~0.9 s long.
+    // Resampler startup delay can move a bound by a frame (20 ms).
+    let near = |got: u64, want: u64| got.abs_diff(want) <= 25;
+    let want = [
+        (0, 0, 900, None),
+        (0, 0, 900, Some("first")),
+        (1, 1000, 1900, None),
+        (1, 1000, 1900, Some("second")),
+    ];
+    assert_eq!(got.len(), want.len(), "{got:?}");
+    for (cue, (id, start, end, raw)) in got.iter().zip(want) {
+        assert_eq!(cue.id, id);
+        assert!(
+            near(cue.start_ms, start) && near(cue.end_ms, end),
+            "{cue:?}"
+        );
+        assert_eq!(cue.raw.as_deref(), raw);
+        assert_eq!(cue.lang, None);
+    }
+}

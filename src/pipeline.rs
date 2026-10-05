@@ -24,6 +24,25 @@ pub struct Cue {
     pub kind: CueKind,
     pub text: String,
     pub id: u64,
+    /// Milliseconds from run start (first audio sample) to utterance start.
+    pub start_ms: u64,
+    /// Milliseconds from run start to where the cue was cut: now for a
+    /// partial, the end of the VAD segment (incl. trailing silence) for a final.
+    pub end_ms: u64,
+    /// Language code, omitted when unknown. Nothing sets it yet: `Transcriber`
+    /// returns text only.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub lang: Option<String>,
+    /// STT line before cleanup. Finals only, for debugging.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub raw: Option<String>,
+}
+
+/// Where an utterance sits on the run timeline.
+#[derive(Debug, Clone, Copy)]
+struct Span {
+    start_ms: u64,
+    end_ms: u64,
 }
 
 pub async fn run<A, S, C>(
@@ -216,7 +235,7 @@ where
         }
     }
 
-    fn spawn_partial(&self, speech: Vec<f32>, busy: Arc<AtomicBool>) {
+    fn spawn_partial(&self, speech: Vec<f32>, span: Span, busy: Arc<AtomicBool>) {
         let stt = self.stt.clone();
         let tx = self.tx.clone();
         let ended = self.ended.clone();
@@ -233,6 +252,10 @@ where
                     kind: CueKind::Partial,
                     text,
                     id: cue_id,
+                    start_ms: span.start_ms,
+                    end_ms: span.end_ms,
+                    lang: None,
+                    raw: None,
                 });
             }
         });
@@ -242,7 +265,7 @@ where
     /// Cleanup starts only after that line exists. At most `MAX_LIVE_FINALS`
     /// finals stay eligible for cleanup; the oldest beyond that emits its raw
     /// line as the final instead. Capture never waits.
-    fn end(&mut self, speech: Vec<f32>) {
+    fn end(&mut self, speech: Vec<f32>, span: Span) {
         let cue_id = self.id;
         self.id += 1;
         self.ended.store(self.id, Ordering::Release);
@@ -275,18 +298,26 @@ where
                     kind: CueKind::Partial,
                     text: raw.clone(),
                     id: cue_id,
+                    start_ms: span.start_ms,
+                    end_ms: span.end_ms,
+                    lang: None,
+                    raw: None,
                 });
                 // biased: a final already shed must not start cleanup at all.
                 let text = tokio::select! {
                     biased;
-                    _ = &mut skip_rx => raw,
-                    cleaned = cleaner.clean(&raw) => cleaned.unwrap_or(raw),
+                    _ = &mut skip_rx => raw.clone(),
+                    cleaned = cleaner.clean(&raw) => cleaned.unwrap_or_else(|_| raw.clone()),
                 };
                 live.lock().unwrap().retain(|(i, _)| *i != cue_id);
                 let cue = Cue {
                     kind: CueKind::Final,
                     text,
                     id: cue_id,
+                    start_ms: span.start_ms,
+                    end_ms: span.end_ms,
+                    lang: None,
+                    raw: Some(raw),
                 };
                 emit_final(&order, &tx, cue_id, Some(cue)).await;
             } else {
@@ -316,6 +347,9 @@ where
     let mut partials = PartialScheduler::new(clock);
     let mut finals = Finalizer::new(stt, cleaner, tx);
     let mut pending: Vec<f32> = Vec::new();
+    // Input samples consumed, skipped frames included. The run timeline is
+    // sample-counted, so it does not depend on wall time or resampler output.
+    let mut consumed: u64 = 0;
 
     loop {
         let mut chunk = Vec::new();
@@ -327,17 +361,26 @@ where
         pending.extend(chunk);
         while pending.len() >= 960 {
             let frame: Vec<f32> = pending.drain(..960).collect();
+            consumed += 960;
             let Some(mono) = resample.process(&frame) else {
                 continue;
+            };
+            let end_ms = consumed * 1000 / in_rate as u64;
+            let span = |samples: usize| Span {
+                start_ms: end_ms.saturating_sub(samples as u64 * 1000 / 16_000),
+                end_ms,
             };
             match vad.push(&mono) {
                 Some(VadEvent::Speaking) => {
                     if let Some(busy) = partials.try_fire(vad.speech().len()) {
-                        finals.spawn_partial(vad.speech().to_vec(), busy);
+                        let speech = vad.speech().to_vec();
+                        let span = span(speech.len());
+                        finals.spawn_partial(speech, span, busy);
                     }
                 }
                 Some(VadEvent::Ended { speech }) => {
-                    finals.end(speech);
+                    let span = span(speech.len());
+                    finals.end(speech, span);
                     partials.reset();
                 }
                 None => {}
@@ -379,6 +422,10 @@ mod tests {
             kind: CueKind::Final,
             text: String::new(),
             id,
+            start_ms: 0,
+            end_ms: 0,
+            lang: None,
+            raw: None,
         })
     }
 
@@ -432,5 +479,35 @@ mod tests {
         assert!(s.try_fire(LONG).is_none());
         t.set(Duration::from_secs(5) + PARTIAL_EVERY);
         assert!(s.try_fire(LONG).is_some());
+    }
+
+    #[test]
+    fn cue_json_snapshot() {
+        let partial = Cue {
+            kind: CueKind::Partial,
+            text: "hel".into(),
+            id: 7,
+            start_ms: 1200,
+            end_ms: 2100,
+            lang: None,
+            raw: None,
+        };
+        let fin = Cue {
+            kind: CueKind::Final,
+            text: "Hello.".into(),
+            id: 7,
+            start_ms: 1200,
+            end_ms: 2900,
+            lang: Some("en".into()),
+            raw: Some("hello".into()),
+        };
+        assert_eq!(
+            serde_json::to_string(&partial).unwrap(),
+            r#"{"kind":"partial","text":"hel","id":7,"start_ms":1200,"end_ms":2100}"#
+        );
+        assert_eq!(
+            serde_json::to_string(&fin).unwrap(),
+            r#"{"kind":"final","text":"Hello.","id":7,"start_ms":1200,"end_ms":2900,"lang":"en","raw":"hello"}"#
+        );
     }
 }
