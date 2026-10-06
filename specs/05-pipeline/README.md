@@ -6,7 +6,7 @@ Resample, cut, transcribe, clean, emit `Cue`s with stable ids and strict per-utt
 ## Current state
 [src/pipeline.rs](../../src/pipeline.rs) is split into four stages that `worker` wires in a short loop: drain an `AudioSource`, then per 960-sample frame (copied into one reused buffer, no per-frame allocation) `Resample` -> `Vad` -> `PartialScheduler` / `Finalizer`.
 
-- `Resample`: device rate to 16 kHz. On error it resets and returns `None`; the frame is skipped.
+- `Resample`: device rate to 16 kHz. On error it resets and returns `None`; the frame is skipped. A unit test in `src/pipeline.rs` sets a `cfg(test)` thread-local that trims one sample off the next frame, so rubato fails for real; `worker` then skips that frame and carries on.
 - `Vad`: thin wrapper over `Segmenter`.
 - `PartialScheduler`: decides when a partial may start (900 ms since the last partial or final, more than 0.5 s of speech, none already running). It owns the busy flag and reads time only through the `Clock` trait. It spawns nothing.
 - `Finalizer`: owns the utterance id and the `ended` counter, and spawns the detached partial and final tasks that send cues. It also keeps the list of finals still eligible for cleanup (`MAX_LIVE_FINALS` = 3). When a fourth utterance ends, the oldest eligible final is told to skip cleanup and sends its raw STT line as the final, with a `warn` log of the shed id. Capture never waits on this.
@@ -35,7 +35,7 @@ Landed in #1:
 - Id is assigned for the utterance and reused for its partial and final, then incremented.
 - `ended` drops a partial whose utterance has already closed. Check-then-send is not atomic; noted in the source.
 - Partials use `try_send`. Finals use `send`. A closed channel is logged.
-- A resample error resets the resampler and skips the frame. That path has no test.
+- A resample error resets the resampler and skips the frame. Covered by `resample_error_skips_frame_and_worker_keeps_emitting`.
 
 Fakes (including `FakeSource` and `CountingStt`) live inline in [tests/pipeline.rs](../../tests/pipeline.rs), not in `tests/common/`.
 
@@ -45,10 +45,10 @@ Fixed in #1. Kept here so the tests stay the regression net.
 - **Id mismatch.** Partial and final used different ids. Id is now taken, then incremented on `Ended`.
 - **Late partial overwrites final.** Partial task checks `ended` before send.
 - **Dropped on full channel.** Partials `try_send`, finals `send`.
-- **Resampler error kills the loop.** Error resets and continues. Still untested.
+- **Resampler error kills the loop.** Error resets and continues. Covered by `resample_error_skips_frame_and_worker_keeps_emitting`.
 
 ## Todo
-- [x] **Fix the four bugs above**, each with a failing test first. (Tests in `tests/pipeline.rs`; the channel-policy test passed before the fix and guards regression. Resampler-reset path has no test.)
+- [x] **Fix the four bugs above**, each with a failing test first. (Tests in `tests/pipeline.rs`; the channel-policy test passed before the fix and guards regression. The resampler-reset test is a unit test in `src/pipeline.rs`.)
 - [x] **Rate from capture** (see [01](../01-capture/README.md)). Remove `SUBS_RATE`.
 - [x] **Split `worker`.** Pure stages: `Resample`, `Vad`, `PartialScheduler` (decides when to fire, given elapsed and speech length), `Finalizer`. Accept: `worker` is a short loop wiring stages; scheduler is unit-tested with a fake clock.
 - [x] **Injectable clock.** `Instant::now()` behind a small trait or `tokio::time::pause` in tests. Accept: no real sleeps in pipeline tests. (Scheduler tests use a fake `Clock`; integration tests use `#[tokio::test(start_paused = true)]`, which needs tokio `test-util` as a dev-dependency.)
@@ -59,10 +59,10 @@ Fixed in #1. Kept here so the tests stay the regression net.
 - [x] **Allocation in the loop.** `pending.drain(..960).collect()` allocates per frame. Reuse a frame buffer. Accept: no `collect` in the hot loop. (`worker` keeps one 960-capacity `frame` Vec, clears it and refills from `pending.drain(..960)`; the tail stays in `pending`. Covered by the existing pipeline tests.)
 - [x] **Graceful shutdown.** Ctrl-C stops capture, flushes the current utterance as a final, then exits. Accept: manual check plus a test using a cancellation token. (Test: `cancel_mid_speech_flushes_one_final`. The Ctrl-C and stream-drop path in `main` is not covered by a test; check it by hand.)
 - [x] **Metrics.** Per-stage latency (vad end to STT done, STT to cleanup done) via `tracing` spans. Accept: one log line per final with both numbers. (One `info!` event rather than spans. Test: `each_final_logs_stt_and_cleanup_ms` in `tests/timing_log.rs`, its own binary because tracing caches callsite interest process-wide.)
-- [ ] **Resampler reset test.** Feed a frame that makes `process` fail, assert the worker is still running and later frames still emit. Accept: one test, no device.
+- [x] **Resampler reset test.** Feed a frame that makes `process` fail, assert the worker is still running and later frames still emit. Accept: one test, no device. (Unit test `resample_error_skips_frame_and_worker_keeps_emitting` in `src/pipeline.rs`: a `cfg(test)` hook fails the first frame, then 0.5 s speech and silence yield a `HELLO` final, the hook is asserted consumed, and the worker is still running until cancelled. Paused tokio time. It does not assert timing of the skipped frame.)
 
 ## Tests
-Today: four `PartialScheduler` unit tests, one `Reorder` unit test and one `Cue` JSON snapshot test in `src/pipeline.rs` (the scheduler ones use a fake clock), and eight tests in `tests/pipeline.rs`: three with inline `FakeStt` / `FakeCleaner` and a pre-filled ring, one with `FakeSource` that asserts the exact cue sequence for speech, silence, speech, one with a slow STT that asserts the cleanup cap and that capture drains fully, one with inverted STT delays that asserts finals still come out in id order, one that asserts cue timing and `raw`, and one that cancels mid-speech and asserts a single flushed final, with the channel closing by itself. `tests/timing_log.rs` adds one more: fake STT and cleaner with fixed delays, captured log output asserted to contain `stt_ms=50` and `cleanup_ms=30`. Integration tests run on paused tokio time, so no real sleeps. Whisper and llama are never run.
+Today: four `PartialScheduler` unit tests, one `Reorder` unit test, one `Cue` JSON snapshot test and one resampler-reset test in `src/pipeline.rs` (the scheduler ones use a fake clock; the reset one runs `worker` on paused tokio time with inline fakes), and eight tests in `tests/pipeline.rs`: three with inline `FakeStt` / `FakeCleaner` and a pre-filled ring, one with `FakeSource` that asserts the exact cue sequence for speech, silence, speech, one with a slow STT that asserts the cleanup cap and that capture drains fully, one with inverted STT delays that asserts finals still come out in id order, one that asserts cue timing and `raw`, and one that cancels mid-speech and asserts a single flushed final, with the channel closing by itself. `tests/timing_log.rs` adds one more: fake STT and cleaner with fixed delays, captured log output asserted to contain `stt_ms=50` and `cleanup_ms=30`. Integration tests run on paused tokio time, so no real sleeps. Whisper and llama are never run.
 
 Still to add: move the fakes into `tests/common/` once a second test file needs them.
 
