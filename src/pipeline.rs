@@ -360,7 +360,7 @@ where
 
 async fn worker<A, S, C, K>(
     mut audio: A,
-    in_rate: u32,
+    mut in_rate: u32,
     stt: Arc<S>,
     cleaner: Arc<C>,
     tx: tokio::sync::mpsc::Sender<Cue>,
@@ -386,6 +386,12 @@ where
     while !cancel.is_cancelled() {
         let mut chunk = Vec::new();
         audio.drain(&mut chunk);
+        // Device switched: new rate, so a new resampler and a fresh frame.
+        if let Some(rate) = audio.new_rate() {
+            in_rate = rate;
+            resample = Resample::new(rate)?;
+            pending.clear();
+        }
         if chunk.is_empty() {
             tokio::select! {
                 _ = cancel.cancelled() => {}

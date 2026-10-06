@@ -3,8 +3,8 @@ use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use cpal::{SampleFormat, Stream};
 use ringbuf::traits::{Consumer, Producer, Split};
 use ringbuf::HeapRb;
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::{mpsc, Arc};
 use std::time::{Duration, Instant};
 
 /// Mono frames downmixed per `push_slice`. The stack buffer is 2 KiB.
@@ -14,9 +14,30 @@ pub struct Capture {
     pub device_name: String,
     pub sample_rate: u32,
     pub channels: u16,
-    pub audio_rx: AudioRx,
     /// Kept alive. Dropping the stream stops capture.
-    pub stream: Stream,
+    stream: Stream,
+    /// Set by the stream error callback.
+    failed: Arc<AtomicBool>,
+    /// `SUBS_DEVICE` unset: follow the default output device.
+    follow_default: bool,
+    swap_tx: mpsc::Sender<Swap>,
+}
+
+/// A fresh ring from a reopened stream, handed to `AudioRx`.
+struct Swap {
+    cons: ringbuf::HeapCons<f32>,
+    dropped: Arc<AtomicU64>,
+    rate: u32,
+}
+
+struct Opened {
+    stream: Stream,
+    device_name: String,
+    sample_rate: u32,
+    channels: u16,
+    cons: ringbuf::HeapCons<f32>,
+    dropped: Arc<AtomicU64>,
+    failed: Arc<AtomicBool>,
 }
 
 pub struct AudioRx {
@@ -24,6 +45,8 @@ pub struct AudioRx {
     dropped: Arc<AtomicU64>,
     logged: u64,
     last_log: Instant,
+    swap: Option<mpsc::Receiver<Swap>>,
+    new_rate: Option<u32>,
 }
 
 impl AudioRx {
@@ -35,6 +58,8 @@ impl AudioRx {
             dropped,
             logged: 0,
             last_log: Instant::now(),
+            swap: None,
+            new_rate: None,
         }
     }
 
@@ -48,11 +73,23 @@ impl AudioRx {
 pub trait AudioSource {
     /// Non-blocking: append whatever is ready to `out`, possibly nothing.
     fn drain(&mut self, out: &mut Vec<f32>);
+
+    /// Rate of the source after it switched devices, once. Default: never.
+    fn new_rate(&mut self) -> Option<u32> {
+        None
+    }
 }
 
 impl AudioSource for AudioRx {
     /// Also logs ring overruns, at most once per second.
     fn drain(&mut self, out: &mut Vec<f32>) {
+        // Reopened stream: the old ring is dead, its few leftover samples go.
+        if let Some(sw) = self.swap.as_ref().and_then(|r| r.try_iter().last()) {
+            self.cons = sw.cons;
+            self.dropped = sw.dropped;
+            self.logged = 0;
+            self.new_rate = Some(sw.rate);
+        }
         out.extend(self.cons.pop_iter());
         let dropped = self.dropped();
         if dropped > self.logged && self.last_log.elapsed() >= Duration::from_secs(1) {
@@ -60,6 +97,10 @@ impl AudioSource for AudioRx {
             self.logged = dropped;
             self.last_log = Instant::now();
         }
+    }
+
+    fn new_rate(&mut self) -> Option<u32> {
+        self.new_rate.take()
     }
 }
 
@@ -169,7 +210,52 @@ pub fn list_devices() -> Result<()> {
     Ok(())
 }
 
-pub fn start_loopback() -> Result<Capture> {
+impl Capture {
+    /// The stream errored, or the default output device changed.
+    pub fn needs_reopen(&self) -> bool {
+        self.failed.load(Ordering::Relaxed)
+            || (self.follow_default
+                && cpal::default_host()
+                    .default_output_device()
+                    .and_then(|d| d.name().ok())
+                    .is_some_and(|n| n != self.device_name))
+    }
+
+    /// Open the device again and hand the pipeline the new ring and rate.
+    pub fn reopen(&mut self) -> Result<()> {
+        let o = open()?;
+        self.stream = o.stream;
+        self.device_name = o.device_name;
+        self.sample_rate = o.sample_rate;
+        self.channels = o.channels;
+        self.failed = o.failed;
+        let _ = self.swap_tx.send(Swap {
+            cons: o.cons,
+            dropped: o.dropped,
+            rate: o.sample_rate,
+        });
+        Ok(())
+    }
+}
+
+pub fn start_loopback() -> Result<(Capture, AudioRx)> {
+    let o = open()?;
+    let (swap_tx, swap_rx) = mpsc::channel();
+    let mut rx = AudioRx::new(o.cons, o.dropped);
+    rx.swap = Some(swap_rx);
+    let cap = Capture {
+        device_name: o.device_name,
+        sample_rate: o.sample_rate,
+        channels: o.channels,
+        stream: o.stream,
+        failed: o.failed,
+        follow_default: std::env::var("SUBS_DEVICE").is_err(),
+        swap_tx,
+    };
+    Ok((cap, rx))
+}
+
+fn open() -> Result<Opened> {
     let host = cpal::default_host();
 
     // Loopback: open the *output* device as an input stream.
@@ -194,58 +280,39 @@ pub fn start_loopback() -> Result<Capture> {
     let rb = HeapRb::<f32>::new(sample_rate as usize * 8);
     let (prod, cons) = rb.split();
     let dropped = Arc::new(AtomicU64::new(0));
+    let failed = Arc::new(AtomicBool::new(false));
 
+    macro_rules! build_as {
+        ($t:ty, $conv:expr) => {
+            build::<$t>(
+                &device,
+                &config.clone().into(),
+                prod,
+                dropped.clone(),
+                failed.clone(),
+                channels,
+                $conv,
+            )?
+        };
+    }
     let stream = match config.sample_format() {
-        SampleFormat::F32 => build::<f32>(
-            &device,
-            &config.into(),
-            prod,
-            dropped.clone(),
-            channels,
-            |s| s,
-        )?,
-        SampleFormat::I16 => build::<i16>(
-            &device,
-            &config.into(),
-            prod,
-            dropped.clone(),
-            channels,
-            i16_to_f32,
-        )?,
-        SampleFormat::U16 => build::<u16>(
-            &device,
-            &config.into(),
-            prod,
-            dropped.clone(),
-            channels,
-            u16_to_f32,
-        )?,
-        SampleFormat::I32 => build::<i32>(
-            &device,
-            &config.into(),
-            prod,
-            dropped.clone(),
-            channels,
-            i32_to_f32,
-        )?,
-        SampleFormat::F64 => build::<f64>(
-            &device,
-            &config.into(),
-            prod,
-            dropped.clone(),
-            channels,
-            f64_to_f32,
-        )?,
+        SampleFormat::F32 => build_as!(f32, |s| s),
+        SampleFormat::I16 => build_as!(i16, i16_to_f32),
+        SampleFormat::U16 => build_as!(u16, u16_to_f32),
+        SampleFormat::I32 => build_as!(i32, i32_to_f32),
+        SampleFormat::F64 => build_as!(f64, f64_to_f32),
         other => return Err(anyhow!("unsupported sample format {other:?}")),
     };
     stream.play()?;
 
-    Ok(Capture {
+    Ok(Opened {
+        stream,
         device_name,
         sample_rate,
         channels,
-        audio_rx: AudioRx::new(cons, dropped),
-        stream,
+        cons,
+        dropped,
+        failed,
     })
 }
 
@@ -254,6 +321,7 @@ fn build<T>(
     config: &cpal::StreamConfig,
     mut prod: ringbuf::HeapProd<f32>,
     dropped: Arc<AtomicU64>,
+    failed: Arc<AtomicBool>,
     channels: u16,
     to_f32: fn(T) -> f32,
 ) -> Result<Stream>
@@ -264,7 +332,10 @@ where
     let stream = device.build_input_stream(
         config,
         move |data: &[T], _| push_mono(&mut prod, &dropped, data, ch, to_f32),
-        |err| tracing::error!(?err, "audio stream error"),
+        move |err| {
+            tracing::error!(?err, "audio stream error");
+            failed.store(true, Ordering::Relaxed);
+        },
         None,
     )?;
     Ok(stream)
@@ -349,5 +420,28 @@ mod tests {
         rx.drain(&mut out);
         assert_eq!(out.len(), 1500);
         assert!(out.iter().all(|&s| s == 0.25));
+    }
+
+    #[test]
+    fn swap_replaces_ring_and_reports_rate() {
+        let (mut prod, mut rx, dropped) = rx(8);
+        let (tx, swap) = mpsc::channel();
+        rx.swap = Some(swap);
+        push_mono(&mut prod, &dropped, &[1.0_f32], 1, |s| s);
+
+        let (mut prod2, cons2) = HeapRb::<f32>::new(8).split();
+        push_mono(&mut prod2, &dropped, &[2.0_f32], 1, |s| s);
+        tx.send(Swap {
+            cons: cons2,
+            dropped: dropped.clone(),
+            rate: 44_100,
+        })
+        .unwrap();
+
+        let mut out = Vec::new();
+        rx.drain(&mut out);
+        assert_eq!(out, [2.0]);
+        assert_eq!(rx.new_rate(), Some(44_100));
+        assert_eq!(rx.new_rate(), None);
     }
 }

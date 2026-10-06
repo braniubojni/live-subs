@@ -38,7 +38,7 @@ async fn main() -> Result<()> {
     let (tx, mut rx) = tokio::sync::mpsc::channel::<Cue>(32);
 
     let cancel = CancellationToken::new();
-    let capture = audio::start_loopback()?;
+    let (capture, audio_rx) = audio::start_loopback()?;
     info!(device = %capture.device_name, rate = capture.sample_rate, "capture started");
 
     let stt = stt::WhisperCli {
@@ -51,7 +51,7 @@ async fn main() -> Result<()> {
         let cleaner =
             cleanup::LlamaServer::spawn(&PathBuf::from(server_bin), &PathBuf::from(llama_model))?;
         tokio::spawn(pipeline::run(
-            capture.audio_rx,
+            audio_rx,
             capture.sample_rate,
             stt,
             cleaner,
@@ -64,7 +64,7 @@ async fn main() -> Result<()> {
             model: PathBuf::from(llama_model),
         };
         tokio::spawn(pipeline::run(
-            capture.audio_rx,
+            audio_rx,
             capture.sample_rate,
             stt,
             cleaner,
@@ -78,7 +78,9 @@ async fn main() -> Result<()> {
     // Ctrl-C: cancel the pipeline and stop capture. It flushes any open
     // utterance as a final, then the channel closes and the loop ends. A second
     // Ctrl-C quits at once.
-    let mut stream = Some(capture.stream);
+    // Once a second: reopen on stream error or default-device change.
+    let mut capture = Some(capture);
+    let mut tick = tokio::time::interval(std::time::Duration::from_secs(1));
     loop {
         let cue = tokio::select! {
             cue = rx.recv() => match cue {
@@ -90,7 +92,16 @@ async fn main() -> Result<()> {
                     break;
                 }
                 cancel.cancel();
-                stream = None;
+                capture = None;
+                continue;
+            }
+            _ = tick.tick() => {
+                if let Some(c) = capture.as_mut().filter(|c| c.needs_reopen()) {
+                    match c.reopen() {
+                        Ok(()) => info!(device = %c.device_name, rate = c.sample_rate, "capture resumed"),
+                        Err(err) => tracing::warn!(?err, "capture reopen failed, retrying"),
+                    }
+                }
                 continue;
             }
         };
@@ -103,6 +114,6 @@ async fn main() -> Result<()> {
             }
         }
     }
-    drop(stream);
+    drop(capture);
     Ok(())
 }
