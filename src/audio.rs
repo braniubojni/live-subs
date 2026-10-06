@@ -114,18 +114,26 @@ fn push_mono<T: Copy>(
 /// Exact-name match over input devices, then output devices. On macOS the
 /// loopback device is an output device. The error lists what is available.
 fn find_device(host: &cpal::Host, name: &str) -> Result<cpal::Device> {
-    let all = || {
-        host.input_devices()
-            .into_iter()
-            .flatten()
-            .chain(host.output_devices().into_iter().flatten())
-    };
-    all()
-        .find(|d| d.name().ok().as_deref() == Some(name))
-        .ok_or_else(|| {
-            let names: Vec<_> = all().filter_map(|d| d.name().ok()).collect();
-            anyhow!("no device named {name:?}; available: {names:?}")
-        })
+    let devices: Vec<_> = host
+        .input_devices()
+        .into_iter()
+        .flatten()
+        .chain(host.output_devices().into_iter().flatten())
+        .collect();
+    let names: Vec<String> = devices
+        .iter()
+        .map(|d| d.name().unwrap_or_default())
+        .collect();
+    match pick_name(&names, name) {
+        Some(i) => Ok(devices.into_iter().nth(i).expect("index from names")),
+        None => Err(anyhow!("no device named {name:?}; available: {names:?}")),
+    }
+}
+
+/// Index of the first exact name match. Inputs precede outputs in `names`,
+/// so a name shared by both resolves to the input.
+fn pick_name(names: &[String], want: &str) -> Option<usize> {
+    names.iter().position(|n| n == want)
 }
 
 /// Print every input and output device: kind, default marker, name, rate, channels.
@@ -270,6 +278,19 @@ mod tests {
         let (prod, cons) = HeapRb::<f32>::new(cap).split();
         let dropped = Arc::new(AtomicU64::new(0));
         (prod, AudioRx::new(cons, dropped.clone()), dropped)
+    }
+
+    #[test]
+    fn pick_name_table() {
+        let n = |v: &[&str]| v.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        // inputs then outputs
+        let names = n(&["Mic", "BlackHole 2ch", "Speakers", "BlackHole 2ch"]);
+        assert_eq!(pick_name(&names, "Mic"), Some(0));
+        assert_eq!(pick_name(&names, "Speakers"), Some(2));
+        assert_eq!(pick_name(&names, "BlackHole 2ch"), Some(1)); // input wins
+        assert_eq!(pick_name(&names, "blackhole 2ch"), None); // exact, case-sensitive
+        assert_eq!(pick_name(&names, "Nope"), None);
+        assert_eq!(pick_name(&[], "Mic"), None);
     }
 
     #[test]
