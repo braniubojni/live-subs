@@ -63,6 +63,25 @@ impl AudioSource for AudioRx {
     }
 }
 
+/// Scale is 2^15: `i16::MIN` is -1, `i16::MAX` is one LSB under 1.
+fn i16_to_f32(s: i16) -> f32 {
+    s as f32 / 32_768.0
+}
+
+/// Origin is 32768. Dividing by `u16::MAX` puts silence half an LSB above 0.
+fn u16_to_f32(s: u16) -> f32 {
+    (s as f32 - 32_768.0) / 32_768.0
+}
+
+/// Scale is 2^31. `i32::MAX` is not exact in f32, so it lands on 1.
+fn i32_to_f32(s: i32) -> f32 {
+    s as f32 / 2_147_483_648.0
+}
+
+fn f64_to_f32(s: f64) -> f32 {
+    s as f32
+}
+
 /// Average each interleaved frame into `out`. Returns mono samples written.
 fn downmix<T: Copy>(data: &[T], ch: usize, to_f32: fn(T) -> f32, out: &mut [f32]) -> usize {
     let mut n = 0;
@@ -136,7 +155,7 @@ pub fn start_loopback() -> Result<Capture> {
             prod,
             dropped.clone(),
             channels,
-            |s| s as f32 / i16::MAX as f32,
+            i16_to_f32,
         )?,
         SampleFormat::U16 => build::<u16>(
             &device,
@@ -144,7 +163,23 @@ pub fn start_loopback() -> Result<Capture> {
             prod,
             dropped.clone(),
             channels,
-            |s| (s as f32 / u16::MAX as f32) * 2.0 - 1.0,
+            u16_to_f32,
+        )?,
+        SampleFormat::I32 => build::<i32>(
+            &device,
+            &config.into(),
+            prod,
+            dropped.clone(),
+            channels,
+            i32_to_f32,
+        )?,
+        SampleFormat::F64 => build::<f64>(
+            &device,
+            &config.into(),
+            prod,
+            dropped.clone(),
+            channels,
+            f64_to_f32,
         )?,
         other => return Err(anyhow!("unsupported sample format {other:?}")),
     };
@@ -197,13 +232,27 @@ mod tests {
         assert_eq!(n, 3);
         assert_eq!(&out[..3], &[0.5, 0.5, -1.0]);
 
-        let n = downmix(
-            &[i16::MAX, i16::MAX],
-            2,
-            |s| s as f32 / i16::MAX as f32,
-            &mut out,
-        );
-        assert_eq!((n, out[0]), (1, 1.0));
+        let n = downmix(&[i16::MIN, i16::MIN], 2, i16_to_f32, &mut out);
+        assert_eq!((n, out[0]), (1, -1.0));
+    }
+
+    #[test]
+    fn sample_to_f32_full_scale() {
+        assert_eq!(i16_to_f32(i16::MIN), -1.0);
+        assert_eq!(i16_to_f32(0), 0.0);
+        assert_eq!(i16_to_f32(i16::MAX), 32_767.0 / 32_768.0);
+
+        assert_eq!(u16_to_f32(0), -1.0);
+        assert_eq!(u16_to_f32(32_768), 0.0);
+        assert_eq!(u16_to_f32(u16::MAX), 32_767.0 / 32_768.0);
+
+        assert_eq!(i32_to_f32(i32::MIN), -1.0);
+        assert_eq!(i32_to_f32(0), 0.0);
+        assert_eq!(i32_to_f32(i32::MAX), 1.0);
+
+        assert_eq!(f64_to_f32(-1.0), -1.0);
+        assert_eq!(f64_to_f32(0.0), 0.0);
+        assert_eq!(f64_to_f32(0.5), 0.5);
     }
 
     #[test]
