@@ -90,7 +90,13 @@ cargo run --release
 
 Set `LLAMA_SERVER` to the `llama-server` binary to keep the cleanup model loaded between lines. Unset, each line spawns `llama-completion` and reloads the model.
 
-macOS asks for system-audio recording permission. Grant it to the terminal you launch from. On Linux, list monitor sources with `pactl list sources short` and set `SUBS_DEVICE` to that name.
+macOS asks for system-audio recording permission. Grant it to the terminal you launch from.
+
+Device selection: `cargo run -- --list-devices` prints `in`/`out`, a `*` on the default, name, rate and channels. `SUBS_DEVICE` is an exact name from that list, input or output. Unset, the default output device is used.
+
+- macOS: the default output device works as is. To pick another, set `SUBS_DEVICE` to an `out` name.
+- Windows: the WASAPI output device name (`out`).
+- Linux: the `.monitor` source name. `--list-devices` shows it, or use `pactl list sources short`.
 
 `ggml-tiny` is the right first model. Move to `ggml-base` only if names and numbers are wrong. Do not put a 7B chat model on the cleanup step. It will miss the 700 ms cap.
 

@@ -111,18 +111,65 @@ fn push_mono<T: Copy>(
     }
 }
 
+/// Exact-name match over input devices, then output devices. On macOS the
+/// loopback device is an output device. The error lists what is available.
+fn find_device(host: &cpal::Host, name: &str) -> Result<cpal::Device> {
+    let all = || {
+        host.input_devices()
+            .into_iter()
+            .flatten()
+            .chain(host.output_devices().into_iter().flatten())
+    };
+    all()
+        .find(|d| d.name().ok().as_deref() == Some(name))
+        .ok_or_else(|| {
+            let names: Vec<_> = all().filter_map(|d| d.name().ok()).collect();
+            anyhow!("no device named {name:?}; available: {names:?}")
+        })
+}
+
+/// Print every input and output device: kind, default marker, name, rate, channels.
+pub fn list_devices() -> Result<()> {
+    let host = cpal::default_host();
+    let default_in = host.default_input_device().and_then(|d| d.name().ok());
+    let default_out = host.default_output_device().and_then(|d| d.name().ok());
+    let line = |kind: &str,
+                default: &Option<String>,
+                d: &cpal::Device,
+                cfg: Option<cpal::SupportedStreamConfig>| {
+        let name = d.name().unwrap_or_else(|_| "unknown".into());
+        let star = if default.as_deref() == Some(name.as_str()) {
+            '*'
+        } else {
+            ' '
+        };
+        match cfg {
+            Some(c) => println!(
+                "{kind} {star} {name}\t{} Hz\t{} ch",
+                c.sample_rate().0,
+                c.channels()
+            ),
+            None => println!("{kind} {star} {name}\t? Hz\t? ch"),
+        }
+    };
+    for d in host.input_devices()? {
+        line("in ", &default_in, &d, d.default_input_config().ok());
+    }
+    for d in host.output_devices()? {
+        line("out", &default_out, &d, d.default_output_config().ok());
+    }
+    Ok(())
+}
+
 pub fn start_loopback() -> Result<Capture> {
     let host = cpal::default_host();
 
     // Loopback: open the *output* device as an input stream.
     // macOS 14.6+ CoreAudio and Windows WASAPI accept this.
     // Linux: select the PipeWire/Pulse ".monitor" source instead, or pass
-    // a device name via SUBS_DEVICE.
+    // a device name via SUBS_DEVICE. See `--list-devices`.
     let device = match std::env::var("SUBS_DEVICE") {
-        Ok(name) => host
-            .input_devices()?
-            .find(|d| d.name().ok().as_deref() == Some(name.as_str()))
-            .ok_or_else(|| anyhow!("no input device named {name}"))?,
+        Ok(name) => find_device(&host, &name)?,
         Err(_) => host
             .default_output_device()
             .or_else(|| host.default_input_device())
