@@ -24,6 +24,7 @@ Constraints from the root [README](../README.md) apply to every spec: no `unsafe
 | 08 | [browser-extension](08-browser-extension/README.md) | Third subscriber over localhost. |
 | 09 | [testing-ci](09-testing-ci/README.md) | Fixtures, benches, CI matrix. |
 | 10 | [packaging](10-packaging/README.md) | Release builds and model download. |
+| 11 | [models-and-setup](11-models-and-setup/README.md) | Engines in the binary, hardware-matched model picker and downloader, settings window. Land before the per-OS manual runs in 01. |
 
 ## Known bugs found while writing these
 
