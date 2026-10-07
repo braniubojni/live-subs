@@ -4,7 +4,12 @@ use std::collections::VecDeque;
 
 #[derive(Clone, Copy)]
 pub struct VadConfig {
-    pub threshold: f32,
+    /// Minimum RMS to start speech.
+    pub open: f32,
+    /// Minimum RMS to keep speech going. Below `open` so quiet word endings do not flap.
+    pub close: f32,
+    /// Gate follows `noise_floor * noise_ratio` when that beats `open`; `close` scales along.
+    pub noise_ratio: f32,
     pub silence_ms: u32,
     pub min_speech_ms: u32,
     pub max_speech_ms: u32,
@@ -14,7 +19,9 @@ pub struct VadConfig {
 impl Default for VadConfig {
     fn default() -> Self {
         Self {
-            threshold: 0.015,
+            open: 0.015,
+            close: 0.010,
+            noise_ratio: 3.0,
             silence_ms: 500,
             min_speech_ms: 250,
             max_speech_ms: 8_000,
@@ -39,6 +46,7 @@ pub struct Segmenter {
     silence_samples: usize,
     voiced_samples: usize,
     in_speech: bool,
+    noise_floor: f32,
 }
 
 impl Segmenter {
@@ -51,12 +59,23 @@ impl Segmenter {
             silence_samples: 0,
             voiced_samples: 0,
             in_speech: false,
+            noise_floor: 0.0,
         }
     }
 
     pub fn push(&mut self, frame: &[f32]) -> Option<VadEvent> {
         let rms = (frame.iter().map(|s| s * s).sum::<f32>() / frame.len().max(1) as f32).sqrt();
-        let voiced = rms >= self.cfg.threshold;
+        let open = self.cfg.open.max(self.noise_floor * self.cfg.noise_ratio);
+        let threshold = if self.in_speech {
+            open * self.cfg.close / self.cfg.open
+        } else {
+            open
+        };
+        let voiced = rms >= threshold;
+        if !self.in_speech && !voiced {
+            let alpha = (frame.len() as f32 / self.sample_rate as f32 / FLOOR_TAU_SECS).min(1.0);
+            self.noise_floor += alpha * (rms - self.noise_floor);
+        }
         if voiced {
             if !self.in_speech {
                 self.speech.extend(self.preroll.drain(..));
@@ -114,6 +133,9 @@ impl Segmenter {
     }
 }
 
+/// Noise floor EMA time constant. Slow, so speech pauses do not drag it up.
+const FLOOR_TAU_SECS: f32 = 2.0;
+
 fn samples(rate: u32, ms: u32) -> usize {
     (rate as usize * ms as usize) / 1000
 }
@@ -152,6 +174,45 @@ mod tests {
             }
             other => panic!("expected Ended, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn hysteresis_keeps_quiet_endings() {
+        let mut seg = Segmenter::new(16_000, VadConfig::default());
+        // 0.012 is between close (0.010) and open (0.015): cannot open...
+        assert!(seg.push(&tone(1_600, 0.012)).is_none());
+        // ...but once open, ramp down through it stays voiced, below close ends.
+        for amp in [0.2, 0.05, 0.02, 0.012, 0.011] {
+            assert!(matches!(
+                seg.push(&tone(1_600, amp)),
+                Some(VadEvent::Speaking)
+            ));
+        }
+        assert!(seg.push(&tone(1_600, 0.005)).is_none());
+        assert_eq!(seg.silence_samples, 1_600);
+    }
+
+    #[test]
+    fn constant_hum_never_triggers() {
+        let mut seg = Segmenter::new(16_000, VadConfig::default());
+        for _ in 0..100 {
+            assert!(seg.push(&tone(1_600, 0.01)).is_none());
+        }
+        assert!(seg.noise_floor > 0.009);
+    }
+
+    #[test]
+    fn speech_over_hum_triggers() {
+        let mut seg = Segmenter::new(16_000, VadConfig::default());
+        for _ in 0..100 {
+            seg.push(&tone(1_600, 0.01));
+        }
+        // floor ~0.01 -> open ~0.03; 0.05 clears it, 0.02 does not.
+        assert!(seg.push(&tone(1_600, 0.02)).is_none());
+        assert!(matches!(
+            seg.push(&tone(1_600, 0.05)),
+            Some(VadEvent::Speaking)
+        ));
     }
 
     #[test]

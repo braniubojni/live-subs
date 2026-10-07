@@ -9,8 +9,8 @@ Cut audio into utterances that start on the first word and end on a natural paus
 ## Todo
 - [x] **Pre-roll.** Keep the last ~200 ms of audio before the gate opens and prepend it. Accept: a test where the first 100 ms is below threshold still contains it in `Ended.speech`.
 - [x] **Short blip really dropped.** A blip below `min_speech_ms` used to stay in `speech` with `in_speech` true, so the next burst merged with it. Silence past the limit without enough voiced samples now resets state. Accept: test with blip, 1 s silence, real speech yields one utterance without the blip.
-- [ ] **Hangover and hysteresis.** Open threshold above close threshold, so quiet word endings do not flap. Accept: config has `open` and `close`; test with an amplitude ramp.
-- [ ] **Adaptive threshold.** Track a noise floor (slow EMA over non-voiced frames) and gate at floor times a ratio, with the fixed value as a minimum. Accept: constant 0.01 hum does not trigger; speech at 0.05 does.
+- [x] **Hangover and hysteresis.** Open threshold above close threshold, so quiet word endings do not flap. Accept: config has `open` and `close`; test with an amplitude ramp.
+- [x] **Adaptive threshold.** Track a noise floor (slow EMA over non-voiced frames) and gate at floor times a ratio, with the fixed value as a minimum. Accept: constant 0.01 hum does not trigger; speech at 0.05 does.
 - [ ] **Cut at the quietest point.** When the 8 s cap hits, search the last 1 s for the lowest-RMS 20 ms window and cut there; carry the remainder into the next utterance. Accept: test where the cut lands in a planted gap.
 - [x] **Sample-rate-aware frames.** `samples()` and `silence_samples: u32` use mixed widths. Use `usize` throughout. Accept: no `as u32` in `vad.rs`.
 - [ ] **`Vad` trait.** Extract `trait Vad { fn push(&mut self, frame:&[f32]) -> Option<VadEvent>; fn speech(&self)->&[f32]; }` so Silero slots in. Pipeline takes `impl Vad`. Accept: pipeline test uses a fake Vad.
