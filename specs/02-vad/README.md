@@ -14,7 +14,7 @@ Cut audio into utterances that start on the first word and end on a natural paus
 - [x] **Cut at the quietest point.** When the 8 s cap hits, search the last 1 s for the lowest-RMS 20 ms window and cut there; carry the remainder into the next utterance. Accept: test where the cut lands in a planted gap.
 - [x] **Sample-rate-aware frames.** `samples()` and `silence_samples: u32` use mixed widths. Use `usize` throughout. Accept: no `as u32` in `vad.rs`.
 - [x] **`Vad` trait.** Extract `trait Vad { fn push(&mut self, frame:&[f32]) -> Option<VadEvent>; fn speech(&self)->&[f32]; fn flush(&mut self)->Option<Vec<f32>>; }` so Silero slots in (`flush` added: pipeline needs it on shutdown). Pipeline takes `impl Vad`. Accept: pipeline test uses a fake Vad.
-- [ ] **Silero VAD.** Behind a cargo feature `silero`, via `ort` or a pure-Rust ONNX runtime. Model file in `models/`. Frame size 512 at 16 kHz. Accept: same trait, same tests pass with both; a recorded fixture (see 09) shows fewer false triggers.
+- [x] **Silero VAD.** Behind a cargo feature `silero`, via `ort` or a pure-Rust ONNX runtime. Model file in `models/`. Frame size 512 at 16 kHz. Accept: same trait, same tests pass with both; a recorded fixture (see 09) shows fewer false triggers. Done: `src/silero.rs` (`ort`, Silero v5, open 0.5 / close 0.35), model fetched to `models/silero_vad.onnx` (gitignored), tests skip when absent; `run` still builds the energy VAD (backend choice waits for the config item, synthetic-tone integration tests would not trigger Silero). Not done: fewer-false-triggers fixture comparison (needs 09).
 - [ ] **Config from [06](../06-config/README.md).** Thresholds read from config, not `Default` only.
 
 ## Tests

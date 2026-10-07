@@ -109,6 +109,27 @@ impl Segmenter {
 
 impl Vad for Segmenter {
     fn push(&mut self, frame: &[f32]) -> Option<VadEvent> {
+        let voiced = self.energy_gate(frame);
+        self.advance(frame, voiced)
+    }
+
+    fn speech(&self) -> &[f32] {
+        &self.speech
+    }
+
+    /// Same min-speech rule as `push`.
+    fn flush(&mut self) -> Option<Vec<f32>> {
+        let long_enough = self.voiced_samples >= samples(self.sample_rate, self.cfg.min_speech_ms);
+        match self.take_end() {
+            VadEvent::Ended { speech } if long_enough => Some(speech),
+            _ => None,
+        }
+    }
+}
+
+impl Segmenter {
+    /// RMS gate with hysteresis and adaptive floor. Updates the floor on non-voiced frames.
+    fn energy_gate(&mut self, frame: &[f32]) -> bool {
         let rms = (frame.iter().map(|s| s * s).sum::<f32>() / frame.len().max(1) as f32).sqrt();
         let open = self.cfg.open.max(self.noise_floor * self.cfg.noise_ratio);
         let threshold = if self.in_speech {
@@ -121,6 +142,11 @@ impl Vad for Segmenter {
             let alpha = (frame.len() as f32 / self.sample_rate as f32 / FLOOR_TAU_SECS).min(1.0);
             self.noise_floor += alpha * (rms - self.noise_floor);
         }
+        voiced
+    }
+
+    /// Segment state machine. `voiced` comes from the energy gate or a model.
+    pub(crate) fn advance(&mut self, frame: &[f32], voiced: bool) -> Option<VadEvent> {
         if voiced {
             if !self.in_speech {
                 self.speech.extend(self.preroll.drain(..));
@@ -154,19 +180,6 @@ impl Vad for Segmenter {
             self.voiced_samples = 0;
         }
         None
-    }
-
-    fn speech(&self) -> &[f32] {
-        &self.speech
-    }
-
-    /// Same min-speech rule as `push`.
-    fn flush(&mut self) -> Option<Vec<f32>> {
-        let long_enough = self.voiced_samples >= samples(self.sample_rate, self.cfg.min_speech_ms);
-        match self.take_end() {
-            VadEvent::Ended { speech } if long_enough => Some(speech),
-            _ => None,
-        }
     }
 }
 
