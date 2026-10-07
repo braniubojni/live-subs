@@ -85,7 +85,7 @@ impl Segmenter {
             self.voiced_samples += frame.len();
             self.speech.extend_from_slice(frame);
             if self.speech.len() >= samples(self.sample_rate, self.cfg.max_speech_ms) {
-                return Some(self.take_end());
+                return Some(self.cut_at_quiet());
             }
             return Some(VadEvent::Speaking);
         }
@@ -124,6 +124,31 @@ impl Segmenter {
         }
     }
 
+    /// Hard cap hit: cut in the quietest 20 ms of the last second, keep the rest as the
+    /// start of the next utterance (still in speech).
+    fn cut_at_quiet(&mut self) -> VadEvent {
+        let win = samples(self.sample_rate, CUT_WINDOW_MS);
+        let from = self
+            .speech
+            .len()
+            .saturating_sub(samples(self.sample_rate, CUT_SEARCH_MS));
+        let mut best = (f32::MAX, from);
+        let mut start = from;
+        while start + win <= self.speech.len() {
+            let energy: f32 = self.speech[start..start + win].iter().map(|s| s * s).sum();
+            if energy < best.0 {
+                best = (energy, start);
+            }
+            start += win;
+        }
+        let cut = (best.1 + win / 2).min(self.speech.len());
+        let rest = self.speech.split_off(cut);
+        let speech = std::mem::replace(&mut self.speech, rest);
+        self.silence_samples = 0;
+        self.voiced_samples = self.speech.len();
+        VadEvent::Ended { speech }
+    }
+
     fn take_end(&mut self) -> VadEvent {
         let speech = std::mem::take(&mut self.speech);
         self.in_speech = false;
@@ -135,6 +160,9 @@ impl Segmenter {
 
 /// Noise floor EMA time constant. Slow, so speech pauses do not drag it up.
 const FLOOR_TAU_SECS: f32 = 2.0;
+
+const CUT_WINDOW_MS: u32 = 20;
+const CUT_SEARCH_MS: u32 = 1_000;
 
 fn samples(rate: u32, ms: u32) -> usize {
     (rate as usize * ms as usize) / 1000
@@ -249,5 +277,26 @@ mod tests {
         let mut seg = Segmenter::new(16_000, VadConfig::default());
         let event = seg.push(&tone(16_000 * 8, 0.2));
         assert!(matches!(event, Some(VadEvent::Ended { .. })));
+    }
+
+    #[test]
+    fn cap_cut_lands_in_the_planted_gap() {
+        let mut seg = Segmenter::new(16_000, VadConfig::default());
+        // 8 s of speech with a 40 ms gap at 7.40 s.
+        let mut sig = tone(16_000 * 8, 0.2);
+        sig[118_400..119_040].fill(0.0);
+        match seg.push(&sig) {
+            Some(VadEvent::Ended { speech }) => {
+                assert!((118_400..=119_040).contains(&speech.len()));
+                // Remainder carries into the next utterance.
+                assert_eq!(speech.len() + seg.speech().len(), sig.len());
+            }
+            other => panic!("expected Ended, got {other:?}"),
+        }
+        // Next frame continues the same utterance.
+        assert!(matches!(
+            seg.push(&tone(1_600, 0.2)),
+            Some(VadEvent::Speaking)
+        ));
     }
 }
