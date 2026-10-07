@@ -335,8 +335,9 @@ async fn cues_carry_run_relative_timing_and_raw_on_finals() {
     let want = [
         (0, 0, 900, None),
         (0, 0, 900, Some("first")),
-        (1, 1000, 1900, None),
-        (1, 1000, 1900, Some("second")),
+        // Second segment opens with 100 ms of preroll (the silence left after the first close).
+        (1, 900, 1900, None),
+        (1, 900, 1900, Some("second")),
     ];
     assert_eq!(got.len(), want.len(), "{got:?}");
     for (cue, (id, start, end, raw)) in got.iter().zip(want) {

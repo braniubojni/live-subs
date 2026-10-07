@@ -1,5 +1,6 @@
 /// Energy VAD. Good enough to cut sentences. Replace with Silero once the
 /// pipeline is stable — the segmenter API below does not have to change.
+use std::collections::VecDeque;
 
 #[derive(Clone, Copy)]
 pub struct VadConfig {
@@ -7,6 +8,7 @@ pub struct VadConfig {
     pub silence_ms: u32,
     pub min_speech_ms: u32,
     pub max_speech_ms: u32,
+    pub preroll_ms: u32,
 }
 
 impl Default for VadConfig {
@@ -16,6 +18,7 @@ impl Default for VadConfig {
             silence_ms: 500,
             min_speech_ms: 250,
             max_speech_ms: 8_000,
+            preroll_ms: 200,
         }
     }
 }
@@ -32,7 +35,8 @@ pub struct Segmenter {
     cfg: VadConfig,
     sample_rate: u32,
     speech: Vec<f32>,
-    silence_samples: u32,
+    preroll: VecDeque<f32>,
+    silence_samples: usize,
     voiced_samples: usize,
     in_speech: bool,
 }
@@ -43,6 +47,7 @@ impl Segmenter {
             cfg,
             sample_rate,
             speech: Vec::with_capacity(sample_rate as usize * 4),
+            preroll: VecDeque::new(),
             silence_samples: 0,
             voiced_samples: 0,
             in_speech: false,
@@ -53,6 +58,9 @@ impl Segmenter {
         let rms = (frame.iter().map(|s| s * s).sum::<f32>() / frame.len().max(1) as f32).sqrt();
         let voiced = rms >= self.cfg.threshold;
         if voiced {
+            if !self.in_speech {
+                self.speech.extend(self.preroll.drain(..));
+            }
             self.in_speech = true;
             self.silence_samples = 0;
             self.voiced_samples += frame.len();
@@ -63,11 +71,15 @@ impl Segmenter {
             return Some(VadEvent::Speaking);
         }
         if !self.in_speech {
+            let keep = samples(self.sample_rate, self.cfg.preroll_ms);
+            self.preroll.extend(frame);
+            let extra = self.preroll.len().saturating_sub(keep);
+            self.preroll.drain(..extra);
             return None;
         }
-        self.silence_samples += frame.len() as u32;
+        self.silence_samples += frame.len();
         self.speech.extend_from_slice(frame);
-        if self.silence_samples >= samples(self.sample_rate, self.cfg.silence_ms) as u32 {
+        if self.silence_samples >= samples(self.sample_rate, self.cfg.silence_ms) {
             if self.voiced_samples >= samples(self.sample_rate, self.cfg.min_speech_ms) {
                 return Some(self.take_end());
             }
@@ -128,6 +140,34 @@ mod tests {
             Some(VadEvent::Speaking)
         ));
         assert!(seg.push(&tone(8_000, 0.0)).is_none());
+        // Real speech after the blip: the 0.2 blip must not be in the buffer.
+        assert!(matches!(
+            seg.push(&tone(8_000, 0.1)),
+            Some(VadEvent::Speaking)
+        ));
+        match seg.push(&tone(8_000, 0.0)) {
+            Some(VadEvent::Ended { speech }) => {
+                assert!(speech.iter().all(|s| *s <= 0.1));
+                assert_eq!(speech.len(), 8_000 + 8_000);
+            }
+            other => panic!("expected Ended, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn preroll_is_prepended() {
+        let mut seg = Segmenter::new(16_000, VadConfig::default());
+        // 1 s quiet, then speech: only the last 200 ms of the quiet part is kept.
+        assert!(seg.push(&tone(16_000, 0.001)).is_none());
+        seg.push(&tone(8_000, 0.2));
+        match seg.push(&tone(8_000, 0.0)) {
+            Some(VadEvent::Ended { speech }) => {
+                assert_eq!(speech.len(), 3_200 + 8_000 + 8_000);
+                assert_eq!(speech[0], 0.001);
+                assert_eq!(speech[3_200], 0.2);
+            }
+            other => panic!("expected Ended, got {other:?}"),
+        }
     }
 
     #[test]
