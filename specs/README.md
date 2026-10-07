@@ -26,6 +26,16 @@ Constraints from the root [README](../README.md) apply to every spec: no `unsafe
 | 10 | [packaging](10-packaging/README.md) | Release builds and model download. |
 | 11 | [models-and-setup](11-models-and-setup/README.md) | Engines in the binary, hardware-matched model picker and downloader, settings window. Land before the per-OS manual runs in 01. |
 
+## Reporting remaining work
+
+When asked "what spec is remaining", "what is left" or similar, and before asking the user for any manual check, list the remaining work first:
+
+1. Run `grep -c '^- \[ \]' specs/*/README.md` (open) and `grep -c '^- \[x\]' specs/*/README.md` (done). Checkboxes are the source of truth; do not answer from memory.
+2. Report per spec: open / total, then the open item names. Mark which are code still to write and which are only a manual run.
+3. Only then ask for the manual check, and say which boxes it would tick.
+
+A box that landed in code but still needs a manual run stays unticked, with the pending run named in the spec.
+
 ## Known bugs found while writing these
 
 Fixed in #2, do not re-open:
