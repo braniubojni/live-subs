@@ -38,6 +38,16 @@ pub enum VadEvent {
     Ended { speech: Vec<f32> },
 }
 
+/// Utterance segmenter over 16 kHz mono frames. `Segmenter` is the energy
+/// implementation; a model-based one (Silero) can slot in behind the same trait.
+pub trait Vad {
+    fn push(&mut self, frame: &[f32]) -> Option<VadEvent>;
+    /// Samples of the utterance in progress.
+    fn speech(&self) -> &[f32];
+    /// Close an utterance still open (shutdown). `None` if too short to keep.
+    fn flush(&mut self) -> Option<Vec<f32>>;
+}
+
 pub struct Segmenter {
     cfg: VadConfig,
     sample_rate: u32,
@@ -63,7 +73,63 @@ impl Segmenter {
         }
     }
 
-    pub fn push(&mut self, frame: &[f32]) -> Option<VadEvent> {
+    /// Hard cap hit: cut in the quietest 20 ms of the last second, keep the rest as the
+    /// start of the next utterance (still in speech).
+    fn cut_at_quiet(&mut self) -> VadEvent {
+        let win = samples(self.sample_rate, CUT_WINDOW_MS);
+        let from = self
+            .speech
+            .len()
+            .saturating_sub(samples(self.sample_rate, CUT_SEARCH_MS));
+        let mut best = (f32::MAX, from);
+        let mut start = from;
+        while start + win <= self.speech.len() {
+            let energy: f32 = self.speech[start..start + win].iter().map(|s| s * s).sum();
+            if energy < best.0 {
+                best = (energy, start);
+            }
+            start += win;
+        }
+        let cut = (best.1 + win / 2).min(self.speech.len());
+        let rest = self.speech.split_off(cut);
+        let speech = std::mem::replace(&mut self.speech, rest);
+        self.silence_samples = 0;
+        self.voiced_samples = self.speech.len();
+        VadEvent::Ended { speech }
+    }
+
+    fn take_end(&mut self) -> VadEvent {
+        let speech = std::mem::take(&mut self.speech);
+        self.in_speech = false;
+        self.silence_samples = 0;
+        self.voiced_samples = 0;
+        VadEvent::Ended { speech }
+    }
+}
+
+impl Vad for Segmenter {
+    fn push(&mut self, frame: &[f32]) -> Option<VadEvent> {
+        let voiced = self.energy_gate(frame);
+        self.advance(frame, voiced)
+    }
+
+    fn speech(&self) -> &[f32] {
+        &self.speech
+    }
+
+    /// Same min-speech rule as `push`.
+    fn flush(&mut self) -> Option<Vec<f32>> {
+        let long_enough = self.voiced_samples >= samples(self.sample_rate, self.cfg.min_speech_ms);
+        match self.take_end() {
+            VadEvent::Ended { speech } if long_enough => Some(speech),
+            _ => None,
+        }
+    }
+}
+
+impl Segmenter {
+    /// RMS gate with hysteresis and adaptive floor. Updates the floor on non-voiced frames.
+    fn energy_gate(&mut self, frame: &[f32]) -> bool {
         let rms = (frame.iter().map(|s| s * s).sum::<f32>() / frame.len().max(1) as f32).sqrt();
         let open = self.cfg.open.max(self.noise_floor * self.cfg.noise_ratio);
         let threshold = if self.in_speech {
@@ -76,6 +142,11 @@ impl Segmenter {
             let alpha = (frame.len() as f32 / self.sample_rate as f32 / FLOOR_TAU_SECS).min(1.0);
             self.noise_floor += alpha * (rms - self.noise_floor);
         }
+        voiced
+    }
+
+    /// Segment state machine. `voiced` comes from the energy gate or a model.
+    pub(crate) fn advance(&mut self, frame: &[f32], voiced: bool) -> Option<VadEvent> {
         if voiced {
             if !self.in_speech {
                 self.speech.extend(self.preroll.drain(..));
@@ -85,7 +156,7 @@ impl Segmenter {
             self.voiced_samples += frame.len();
             self.speech.extend_from_slice(frame);
             if self.speech.len() >= samples(self.sample_rate, self.cfg.max_speech_ms) {
-                return Some(self.take_end());
+                return Some(self.cut_at_quiet());
             }
             return Some(VadEvent::Speaking);
         }
@@ -110,31 +181,13 @@ impl Segmenter {
         }
         None
     }
-
-    pub fn speech(&self) -> &[f32] {
-        &self.speech
-    }
-
-    /// Close an utterance still open (shutdown). Same min-speech rule as `push`.
-    pub fn flush(&mut self) -> Option<Vec<f32>> {
-        let long_enough = self.voiced_samples >= samples(self.sample_rate, self.cfg.min_speech_ms);
-        match self.take_end() {
-            VadEvent::Ended { speech } if long_enough => Some(speech),
-            _ => None,
-        }
-    }
-
-    fn take_end(&mut self) -> VadEvent {
-        let speech = std::mem::take(&mut self.speech);
-        self.in_speech = false;
-        self.silence_samples = 0;
-        self.voiced_samples = 0;
-        VadEvent::Ended { speech }
-    }
 }
 
 /// Noise floor EMA time constant. Slow, so speech pauses do not drag it up.
 const FLOOR_TAU_SECS: f32 = 2.0;
+
+const CUT_WINDOW_MS: u32 = 20;
+const CUT_SEARCH_MS: u32 = 1_000;
 
 fn samples(rate: u32, ms: u32) -> usize {
     (rate as usize * ms as usize) / 1000
@@ -142,7 +195,7 @@ fn samples(rate: u32, ms: u32) -> usize {
 
 #[cfg(test)]
 mod tests {
-    use super::{Segmenter, VadConfig, VadEvent};
+    use super::{Segmenter, Vad, VadConfig, VadEvent};
 
     fn tone(n: usize, amp: f32) -> Vec<f32> {
         vec![amp; n]
@@ -249,5 +302,26 @@ mod tests {
         let mut seg = Segmenter::new(16_000, VadConfig::default());
         let event = seg.push(&tone(16_000 * 8, 0.2));
         assert!(matches!(event, Some(VadEvent::Ended { .. })));
+    }
+
+    #[test]
+    fn cap_cut_lands_in_the_planted_gap() {
+        let mut seg = Segmenter::new(16_000, VadConfig::default());
+        // 8 s of speech with a 40 ms gap at 7.40 s.
+        let mut sig = tone(16_000 * 8, 0.2);
+        sig[118_400..119_040].fill(0.0);
+        match seg.push(&sig) {
+            Some(VadEvent::Ended { speech }) => {
+                assert!((118_400..=119_040).contains(&speech.len()));
+                // Remainder carries into the next utterance.
+                assert_eq!(speech.len() + seg.speech().len(), sig.len());
+            }
+            other => panic!("expected Ended, got {other:?}"),
+        }
+        // Next frame continues the same utterance.
+        assert!(matches!(
+            seg.push(&tone(1_600, 0.2)),
+            Some(VadEvent::Speaking)
+        ));
     }
 }

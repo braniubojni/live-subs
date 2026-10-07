@@ -2,7 +2,7 @@
 //! Device capture is not exercised here. CI has no audio device.
 
 use live_subs::cleanup::accept_cleanup;
-use live_subs::vad::{Segmenter, VadConfig, VadEvent};
+use live_subs::vad::{Segmenter, Vad, VadConfig, VadEvent};
 
 fn tone(n: usize, amp: f32) -> Vec<f32> {
     vec![amp; n]

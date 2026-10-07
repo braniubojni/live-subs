@@ -23,10 +23,12 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 eframe = { version = "0.31", optional = true }
 dotenvy = "0.15.7"
 tokio-util = { version = "0.7", default-features = false }
+ort = { version = "2.0.0-rc.13", optional = true }
 
 [features]
 default = []
 overlay = ["dep:eframe"]
+silero = ["dep:ort"]
 
 [lints.rust]
 unsafe_code = "forbid"
