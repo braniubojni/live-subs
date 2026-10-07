@@ -13,7 +13,7 @@ Cut audio into utterances that start on the first word and end on a natural paus
 - [x] **Adaptive threshold.** Track a noise floor (slow EMA over non-voiced frames) and gate at floor times a ratio, with the fixed value as a minimum. Accept: constant 0.01 hum does not trigger; speech at 0.05 does.
 - [x] **Cut at the quietest point.** When the 8 s cap hits, search the last 1 s for the lowest-RMS 20 ms window and cut there; carry the remainder into the next utterance. Accept: test where the cut lands in a planted gap.
 - [x] **Sample-rate-aware frames.** `samples()` and `silence_samples: u32` use mixed widths. Use `usize` throughout. Accept: no `as u32` in `vad.rs`.
-- [ ] **`Vad` trait.** Extract `trait Vad { fn push(&mut self, frame:&[f32]) -> Option<VadEvent>; fn speech(&self)->&[f32]; }` so Silero slots in. Pipeline takes `impl Vad`. Accept: pipeline test uses a fake Vad.
+- [x] **`Vad` trait.** Extract `trait Vad { fn push(&mut self, frame:&[f32]) -> Option<VadEvent>; fn speech(&self)->&[f32]; fn flush(&mut self)->Option<Vec<f32>>; }` so Silero slots in (`flush` added: pipeline needs it on shutdown). Pipeline takes `impl Vad`. Accept: pipeline test uses a fake Vad.
 - [ ] **Silero VAD.** Behind a cargo feature `silero`, via `ort` or a pure-Rust ONNX runtime. Model file in `models/`. Frame size 512 at 16 kHz. Accept: same trait, same tests pass with both; a recorded fixture (see 09) shows fewer false triggers.
 - [ ] **Config from [06](../06-config/README.md).** Thresholds read from config, not `Default` only.
 

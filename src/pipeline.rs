@@ -1,7 +1,7 @@
 use crate::audio::AudioSource;
 use crate::cleanup::Cleaner;
 use crate::stt::{with_timeout, Transcriber};
-use crate::vad::{Segmenter, VadConfig, VadEvent};
+use crate::vad::{Segmenter, Vad, VadConfig, VadEvent};
 use anyhow::Result;
 use rubato::{FastFixedIn, PolynomialDegree, Resampler};
 use serde::Serialize;
@@ -60,7 +60,8 @@ pub async fn run<A, S, C>(
 {
     let stt = Arc::new(stt);
     let cleaner = Arc::new(cleaner);
-    if let Err(err) = worker(audio, in_rate, stt, cleaner, tx, TokioClock, cancel).await {
+    let vad = Segmenter::new(16_000, VadConfig::default());
+    if let Err(err) = worker(audio, in_rate, vad, stt, cleaner, tx, TokioClock, cancel).await {
         tracing::error!(?err, "pipeline stopped");
     }
 }
@@ -116,27 +117,6 @@ impl Resample {
                 None
             }
         }
-    }
-}
-
-/// Utterance segmentation over 16 kHz mono.
-struct Vad(Segmenter);
-
-impl Vad {
-    fn new() -> Self {
-        Self(Segmenter::new(16_000, VadConfig::default()))
-    }
-
-    fn push(&mut self, mono: &[f32]) -> Option<VadEvent> {
-        self.0.push(mono)
-    }
-
-    fn speech(&self) -> &[f32] {
-        self.0.speech()
-    }
-
-    fn flush(&mut self) -> Option<Vec<f32>> {
-        self.0.flush()
     }
 }
 
@@ -358,9 +338,11 @@ where
     }
 }
 
-async fn worker<A, S, C, K>(
+#[allow(clippy::too_many_arguments)]
+async fn worker<A, V, S, C, K>(
     mut audio: A,
     mut in_rate: u32,
+    mut vad: V,
     stt: Arc<S>,
     cleaner: Arc<C>,
     tx: tokio::sync::mpsc::Sender<Cue>,
@@ -369,12 +351,12 @@ async fn worker<A, S, C, K>(
 ) -> Result<()>
 where
     A: AudioSource,
+    V: Vad,
     S: Transcriber + 'static,
     C: Cleaner + 'static,
     K: Clock,
 {
     let mut resample = Resample::new(in_rate)?;
-    let mut vad = Vad::new();
     let mut partials = PartialScheduler::new(clock);
     let mut finals = Finalizer::new(stt, cleaner, tx);
     let mut pending: Vec<f32> = Vec::new();
@@ -505,6 +487,7 @@ mod tests {
         let task = tokio::spawn(worker(
             OneChunk(Some(audio)),
             RATE as u32,
+            Segmenter::new(16_000, VadConfig::default()),
             Arc::new(Fixed),
             Arc::new(Fixed),
             tx,
@@ -521,6 +504,47 @@ mod tests {
             got.last(),
             Some(&("Final".to_string(), "HELLO".to_string()))
         );
+        cancel.cancel();
+        task.await.unwrap().unwrap();
+    }
+
+    /// Ends an utterance on the first frame, regardless of the audio.
+    struct FakeVad(bool);
+
+    impl Vad for FakeVad {
+        fn push(&mut self, _frame: &[f32]) -> Option<VadEvent> {
+            (!std::mem::replace(&mut self.0, true)).then(|| VadEvent::Ended {
+                speech: vec![0.5; 8_000],
+            })
+        }
+        fn speech(&self) -> &[f32] {
+            &[]
+        }
+        fn flush(&mut self) -> Option<Vec<f32>> {
+            None
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn worker_uses_injected_vad() {
+        // Pure silence: the energy VAD would emit nothing, the fake still ends one utterance.
+        let (tx, mut rx) = tokio::sync::mpsc::channel::<Cue>(32);
+        let cancel = CancellationToken::new();
+        let task = tokio::spawn(worker(
+            OneChunk(Some(vec![0.0_f32; 48_000])),
+            48_000,
+            FakeVad(false),
+            Arc::new(Fixed),
+            Arc::new(Fixed),
+            tx,
+            TokioClock,
+            cancel.clone(),
+        ));
+        let mut last = None;
+        while let Ok(Some(cue)) = tokio::time::timeout(Duration::from_secs(2), rx.recv()).await {
+            last = Some(cue.text);
+        }
+        assert_eq!(last.as_deref(), Some("HELLO"));
         cancel.cancel();
         task.await.unwrap().unwrap();
     }

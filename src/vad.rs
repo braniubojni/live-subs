@@ -38,6 +38,16 @@ pub enum VadEvent {
     Ended { speech: Vec<f32> },
 }
 
+/// Utterance segmenter over 16 kHz mono frames. `Segmenter` is the energy
+/// implementation; a model-based one (Silero) can slot in behind the same trait.
+pub trait Vad {
+    fn push(&mut self, frame: &[f32]) -> Option<VadEvent>;
+    /// Samples of the utterance in progress.
+    fn speech(&self) -> &[f32];
+    /// Close an utterance still open (shutdown). `None` if too short to keep.
+    fn flush(&mut self) -> Option<Vec<f32>>;
+}
+
 pub struct Segmenter {
     cfg: VadConfig,
     sample_rate: u32,
@@ -63,7 +73,42 @@ impl Segmenter {
         }
     }
 
-    pub fn push(&mut self, frame: &[f32]) -> Option<VadEvent> {
+    /// Hard cap hit: cut in the quietest 20 ms of the last second, keep the rest as the
+    /// start of the next utterance (still in speech).
+    fn cut_at_quiet(&mut self) -> VadEvent {
+        let win = samples(self.sample_rate, CUT_WINDOW_MS);
+        let from = self
+            .speech
+            .len()
+            .saturating_sub(samples(self.sample_rate, CUT_SEARCH_MS));
+        let mut best = (f32::MAX, from);
+        let mut start = from;
+        while start + win <= self.speech.len() {
+            let energy: f32 = self.speech[start..start + win].iter().map(|s| s * s).sum();
+            if energy < best.0 {
+                best = (energy, start);
+            }
+            start += win;
+        }
+        let cut = (best.1 + win / 2).min(self.speech.len());
+        let rest = self.speech.split_off(cut);
+        let speech = std::mem::replace(&mut self.speech, rest);
+        self.silence_samples = 0;
+        self.voiced_samples = self.speech.len();
+        VadEvent::Ended { speech }
+    }
+
+    fn take_end(&mut self) -> VadEvent {
+        let speech = std::mem::take(&mut self.speech);
+        self.in_speech = false;
+        self.silence_samples = 0;
+        self.voiced_samples = 0;
+        VadEvent::Ended { speech }
+    }
+}
+
+impl Vad for Segmenter {
+    fn push(&mut self, frame: &[f32]) -> Option<VadEvent> {
         let rms = (frame.iter().map(|s| s * s).sum::<f32>() / frame.len().max(1) as f32).sqrt();
         let open = self.cfg.open.max(self.noise_floor * self.cfg.noise_ratio);
         let threshold = if self.in_speech {
@@ -111,50 +156,17 @@ impl Segmenter {
         None
     }
 
-    pub fn speech(&self) -> &[f32] {
+    fn speech(&self) -> &[f32] {
         &self.speech
     }
 
-    /// Close an utterance still open (shutdown). Same min-speech rule as `push`.
-    pub fn flush(&mut self) -> Option<Vec<f32>> {
+    /// Same min-speech rule as `push`.
+    fn flush(&mut self) -> Option<Vec<f32>> {
         let long_enough = self.voiced_samples >= samples(self.sample_rate, self.cfg.min_speech_ms);
         match self.take_end() {
             VadEvent::Ended { speech } if long_enough => Some(speech),
             _ => None,
         }
-    }
-
-    /// Hard cap hit: cut in the quietest 20 ms of the last second, keep the rest as the
-    /// start of the next utterance (still in speech).
-    fn cut_at_quiet(&mut self) -> VadEvent {
-        let win = samples(self.sample_rate, CUT_WINDOW_MS);
-        let from = self
-            .speech
-            .len()
-            .saturating_sub(samples(self.sample_rate, CUT_SEARCH_MS));
-        let mut best = (f32::MAX, from);
-        let mut start = from;
-        while start + win <= self.speech.len() {
-            let energy: f32 = self.speech[start..start + win].iter().map(|s| s * s).sum();
-            if energy < best.0 {
-                best = (energy, start);
-            }
-            start += win;
-        }
-        let cut = (best.1 + win / 2).min(self.speech.len());
-        let rest = self.speech.split_off(cut);
-        let speech = std::mem::replace(&mut self.speech, rest);
-        self.silence_samples = 0;
-        self.voiced_samples = self.speech.len();
-        VadEvent::Ended { speech }
-    }
-
-    fn take_end(&mut self) -> VadEvent {
-        let speech = std::mem::take(&mut self.speech);
-        self.in_speech = false;
-        self.silence_samples = 0;
-        self.voiced_samples = 0;
-        VadEvent::Ended { speech }
     }
 }
 
@@ -170,7 +182,7 @@ fn samples(rate: u32, ms: u32) -> usize {
 
 #[cfg(test)]
 mod tests {
-    use super::{Segmenter, VadConfig, VadEvent};
+    use super::{Segmenter, Vad, VadConfig, VadEvent};
 
     fn tone(n: usize, amp: f32) -> Vec<f32> {
         vec![amp; n]
