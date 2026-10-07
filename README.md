@@ -143,5 +143,5 @@ Tests are required for behavior you can run without a microphone:
 
 - In-process `whisper-rs` once the CLI path feels right. Same `Transcriber` trait.
 - Silero VAD instead of the RMS gate.
-- Click-through overlay (`eframe` or Tauri) subscribed to `Cue`.
+- Overlay polish: edit mode, multi-monitor, tray. The basic click-through window works: `cargo run --features overlay -- --overlay`.
 - Browser extension as a third subscriber on `127.0.0.1`. The extension draws the line. It does not run either model.
