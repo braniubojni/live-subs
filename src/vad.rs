@@ -2,7 +2,8 @@
 /// pipeline is stable — the segmenter API below does not have to change.
 use std::collections::VecDeque;
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(default, deny_unknown_fields)]
 pub struct VadConfig {
     /// Minimum RMS to start speech.
     pub open: f32,

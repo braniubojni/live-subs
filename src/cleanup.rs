@@ -17,9 +17,27 @@ pub trait Cleaner: Send + Sync {
     async fn clean(&self, raw: &str) -> Result<String>;
 }
 
+#[async_trait::async_trait]
+impl Cleaner for Box<dyn Cleaner> {
+    async fn clean(&self, raw: &str) -> Result<String> {
+        (**self).clean(raw).await
+    }
+}
+
+/// `--no-cleanup`: the raw transcript is the subtitle.
+pub struct Passthrough;
+
+#[async_trait::async_trait]
+impl Cleaner for Passthrough {
+    async fn clean(&self, raw: &str) -> Result<String> {
+        Ok(raw.trim().to_string())
+    }
+}
+
 pub struct LlamaCli {
     pub bin: PathBuf,
     pub model: PathBuf,
+    pub timeout: Duration,
 }
 
 #[async_trait::async_trait]
@@ -32,7 +50,7 @@ impl Cleaner for LlamaCli {
         // One sentence, tiny context, greedy. This is the whole latency budget.
         let prompt = prompt(raw);
         let out = tokio::time::timeout(
-            Duration::from_millis(700),
+            self.timeout,
             tokio::process::Command::new(&self.bin)
                 .arg("-m")
                 .arg(&self.model)
@@ -110,6 +128,7 @@ pub struct LlamaServer {
     addr: Arc<Mutex<Option<SocketAddr>>>,
     /// `clean` pokes this when nothing is listening.
     down: Arc<Notify>,
+    timeout: Duration,
     // Aborted on drop, which drops the child future and so kills the server.
     task: Option<tokio::task::JoinHandle<()>>,
 }
@@ -200,11 +219,11 @@ async fn supervise<F, Fut>(
 impl LlamaServer {
     /// Starts the first child now, so a bad binary path fails fast. Later failures retry.
     /// Must run inside a tokio runtime.
-    pub fn spawn(bin: &Path, model: &Path) -> Result<Self> {
+    pub fn spawn(bin: &Path, model: &Path, timeout: Duration) -> Result<Self> {
         let (bin, model) = (bin.to_path_buf(), model.to_path_buf());
         // ponytail: no readiness wait; /completion answers 503 while the model loads and
         // that returns raw.
-        Self::start(
+        let mut srv = Self::start(
             move |port| {
                 let mut child = tokio::process::Command::new(&bin)
                     .arg("-m")
@@ -230,7 +249,9 @@ impl LlamaServer {
                 })
             },
             BACKOFF,
-        )
+        )?;
+        srv.timeout = timeout;
+        Ok(srv)
     }
 
     /// `spawn` returns a future that resolves when the child exits and kills it when dropped.
@@ -247,6 +268,7 @@ impl LlamaServer {
         Ok(Self {
             addr,
             down,
+            timeout: Duration::from_millis(700),
             task: Some(task),
         })
     }
@@ -296,7 +318,7 @@ impl Cleaner for LlamaServer {
         let Some(addr) = *self.addr.lock().unwrap() else {
             return Ok(raw.to_string());
         };
-        match tokio::time::timeout(Duration::from_millis(700), self.complete(addr, raw)).await {
+        match tokio::time::timeout(self.timeout, self.complete(addr, raw)).await {
             Ok(Ok(out)) => Ok(first_line(&out, raw)),
             Ok(Err(err)) => {
                 let refused = err
@@ -378,6 +400,7 @@ mod tests {
         LlamaServer {
             addr: Arc::new(Mutex::new(Some(addr))),
             down: Arc::new(Notify::new()),
+            timeout: Duration::from_millis(700),
             task: None,
         }
     }

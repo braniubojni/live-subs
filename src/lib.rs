@@ -3,6 +3,7 @@
 
 pub mod audio;
 pub mod cleanup;
+pub mod config;
 pub mod pipeline;
 #[cfg(feature = "silero")]
 pub mod silero;

@@ -58,10 +58,50 @@ pub async fn run<A, S, C>(
     S: Transcriber + 'static,
     C: Cleaner + 'static,
 {
+    run_with(
+        audio,
+        in_rate,
+        stt,
+        cleaner,
+        tx,
+        cancel,
+        VadConfig::default(),
+        PARTIAL_EVERY,
+    )
+    .await
+}
+
+/// `run` with the tunables from `Config`.
+#[allow(clippy::too_many_arguments)]
+pub async fn run_with<A, S, C>(
+    audio: A,
+    in_rate: u32,
+    stt: S,
+    cleaner: C,
+    tx: tokio::sync::mpsc::Sender<Cue>,
+    cancel: CancellationToken,
+    vad: VadConfig,
+    partial_every: Duration,
+) where
+    A: AudioSource,
+    S: Transcriber + 'static,
+    C: Cleaner + 'static,
+{
     let stt = Arc::new(stt);
     let cleaner = Arc::new(cleaner);
-    let vad = Segmenter::new(16_000, VadConfig::default());
-    if let Err(err) = worker(audio, in_rate, vad, stt, cleaner, tx, TokioClock, cancel).await {
+    let vad = Segmenter::new(16_000, vad);
+    let w = worker(
+        audio,
+        in_rate,
+        vad,
+        stt,
+        cleaner,
+        tx,
+        TokioClock,
+        cancel,
+        partial_every,
+    );
+    if let Err(err) = w.await {
         tracing::error!(?err, "pipeline stopped");
     }
 }
@@ -131,13 +171,15 @@ struct PartialScheduler<K> {
     clock: K,
     /// `None` until the first partial or final, so the first partial is never held back.
     last: Option<Instant>,
+    every: Duration,
     busy: Arc<AtomicBool>,
 }
 
 impl<K: Clock> PartialScheduler<K> {
-    fn new(clock: K) -> Self {
+    fn new(clock: K, every: Duration) -> Self {
         Self {
             clock,
+            every,
             last: None,
             busy: Arc::new(AtomicBool::new(false)),
         }
@@ -149,7 +191,7 @@ impl<K: Clock> PartialScheduler<K> {
         let now = self.clock.now();
         let due = self
             .last
-            .is_none_or(|last| now.duration_since(last) >= PARTIAL_EVERY);
+            .is_none_or(|last| now.duration_since(last) >= self.every);
         if due && speech_len > PARTIAL_MIN_SAMPLES && !self.busy.swap(true, Ordering::AcqRel) {
             self.last = Some(now);
             return Some(self.busy.clone());
@@ -348,6 +390,7 @@ async fn worker<A, V, S, C, K>(
     tx: tokio::sync::mpsc::Sender<Cue>,
     clock: K,
     cancel: CancellationToken,
+    partial_every: Duration,
 ) -> Result<()>
 where
     A: AudioSource,
@@ -357,7 +400,7 @@ where
     K: Clock,
 {
     let mut resample = Resample::new(in_rate)?;
-    let mut partials = PartialScheduler::new(clock);
+    let mut partials = PartialScheduler::new(clock, partial_every);
     let mut finals = Finalizer::new(stt, cleaner, tx);
     let mut pending: Vec<f32> = Vec::new();
     let mut frame: Vec<f32> = Vec::with_capacity(960);
@@ -447,7 +490,7 @@ mod tests {
             base: Instant::now(),
             offset: offset.clone(),
         };
-        (PartialScheduler::new(clock), offset)
+        (PartialScheduler::new(clock, PARTIAL_EVERY), offset)
     }
 
     const LONG: usize = PARTIAL_MIN_SAMPLES + 1;
@@ -493,6 +536,7 @@ mod tests {
             tx,
             TokioClock,
             cancel.clone(),
+            PARTIAL_EVERY,
         ));
         let mut got = Vec::new();
         while let Ok(Some(cue)) = tokio::time::timeout(Duration::from_secs(2), rx.recv()).await {
@@ -539,6 +583,7 @@ mod tests {
             tx,
             TokioClock,
             cancel.clone(),
+            PARTIAL_EVERY,
         ));
         let mut last = None;
         while let Ok(Some(cue)) = tokio::time::timeout(Duration::from_secs(2), rx.recv()).await {

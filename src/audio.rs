@@ -18,8 +18,8 @@ pub struct Capture {
     stream: Stream,
     /// Set by the stream error callback.
     failed: Arc<AtomicBool>,
-    /// `SUBS_DEVICE` unset: follow the default output device.
-    follow_default: bool,
+    /// Configured device name. `None`: follow the default output device.
+    requested: Option<String>,
     swap_tx: mpsc::Sender<Swap>,
 }
 
@@ -214,7 +214,7 @@ impl Capture {
     /// The stream errored, or the default output device changed.
     pub fn needs_reopen(&self) -> bool {
         self.failed.load(Ordering::Relaxed)
-            || (self.follow_default
+            || (self.requested.is_none()
                 && cpal::default_host()
                     .default_output_device()
                     .and_then(|d| d.name().ok())
@@ -223,7 +223,7 @@ impl Capture {
 
     /// Open the device again and hand the pipeline the new ring and rate.
     pub fn reopen(&mut self) -> Result<()> {
-        let o = open()?;
+        let o = open(self.requested.as_deref())?;
         self.stream = o.stream;
         self.device_name = o.device_name;
         self.sample_rate = o.sample_rate;
@@ -238,8 +238,8 @@ impl Capture {
     }
 }
 
-pub fn start_loopback() -> Result<(Capture, AudioRx)> {
-    let o = open()?;
+pub fn start_loopback(device: Option<&str>) -> Result<(Capture, AudioRx)> {
+    let o = open(device)?;
     let (swap_tx, swap_rx) = mpsc::channel();
     let mut rx = AudioRx::new(o.cons, o.dropped);
     rx.swap = Some(swap_rx);
@@ -249,22 +249,22 @@ pub fn start_loopback() -> Result<(Capture, AudioRx)> {
         channels: o.channels,
         stream: o.stream,
         failed: o.failed,
-        follow_default: std::env::var("SUBS_DEVICE").is_err(),
+        requested: device.map(str::to_string),
         swap_tx,
     };
     Ok((cap, rx))
 }
 
-fn open() -> Result<Opened> {
+fn open(device: Option<&str>) -> Result<Opened> {
     let host = cpal::default_host();
 
     // Loopback: open the *output* device as an input stream.
     // macOS 14.6+ CoreAudio and Windows WASAPI accept this.
     // Linux: select the PipeWire/Pulse ".monitor" source instead, or pass
-    // a device name via SUBS_DEVICE. See `--list-devices`.
-    let device = match std::env::var("SUBS_DEVICE") {
-        Ok(name) => find_device(&host, &name)?,
-        Err(_) => host
+    // a device name via `device`. See `--list-devices`.
+    let device = match device {
+        Some(name) => find_device(&host, name)?,
+        None => host
             .default_output_device()
             .or_else(|| host.default_input_device())
             .ok_or_else(|| anyhow!("no audio device"))?,

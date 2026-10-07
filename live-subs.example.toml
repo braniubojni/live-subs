@@ -1,0 +1,29 @@
+# Copy to live-subs.toml (here, or in your user config dir under live-subs/).
+# Precedence, later wins: defaults < this file < env vars < CLI flags.
+# Every key is optional; values below are the defaults.
+# `live-subs --print-config` shows the effective result.
+
+whisper_bin = "whisper-cli"
+whisper_model = "models/ggml-tiny.bin"
+llama_bin = "llama-completion"
+llama_model = "models/cleanup-q4.gguf"
+# One warm llama-server instead of llama_bin per line.
+# llama_server = "llama.cpp/build/bin/llama-server"
+
+# Exact input device name from `--list-devices`. Unset: follow the default output.
+# device = ""
+
+language = "auto"        # whisper -l
+cleanup = true           # false: raw transcript
+cleanup_timeout_ms = 700 # past this the raw line is shown
+partial_every_ms = 900
+channel_size = 32
+
+[vad]
+open = 0.015
+close = 0.010
+noise_ratio = 3.0
+silence_ms = 500
+min_speech_ms = 250
+max_speech_ms = 8000
+preroll_ms = 200
