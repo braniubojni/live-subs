@@ -17,6 +17,8 @@ pub trait Transcriber: Send + Sync {
 pub struct WhisperCli {
     pub bin: PathBuf,
     pub model: PathBuf,
+    /// whisper `-l` value; `auto` detects.
+    pub language: String,
 }
 
 #[async_trait::async_trait]
@@ -34,7 +36,7 @@ impl Transcriber for WhisperCli {
             .arg(&self.model)
             .arg("-f")
             .arg(&wav.0)
-            .args(["-l", "auto", "-nt", "-np", "-t", "4"])
+            .args(["-l", &self.language, "-nt", "-np", "-t", "4"])
             // Dropping the future (timeout, shutdown) must not orphan the child.
             .kill_on_drop(true)
             .output()

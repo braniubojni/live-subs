@@ -6,9 +6,12 @@
 //! cannot stall capture.
 
 use anyhow::Result;
+use clap::Parser;
+use live_subs::cleanup::Cleaner;
+use live_subs::config::{Cli, Config};
 use live_subs::pipeline::Cue;
 use live_subs::{audio, cleanup, pipeline, stt};
-use std::path::PathBuf;
+use std::time::Duration;
 use tokio_util::sync::CancellationToken;
 use tracing::info;
 
@@ -17,9 +20,16 @@ async fn main() -> Result<()> {
     // Optional .env in the working directory. Real env vars win over it.
     dotenvy::dotenv().ok();
 
-    if std::env::args().any(|a| a == "--list-devices") {
+    let cli = Cli::parse();
+    if cli.list_devices {
         return audio::list_devices();
     }
+    let cfg = Config::load(&cli)?;
+    if cli.print_config {
+        print!("{}", toml::to_string_pretty(&cfg)?);
+        return Ok(());
+    }
+    cfg.check_files()?;
 
     tracing_subscriber::fmt()
         .with_env_filter(
@@ -28,50 +38,43 @@ async fn main() -> Result<()> {
         )
         .init();
 
-    let whisper_bin = std::env::var("WHISPER_BIN").unwrap_or_else(|_| "whisper-cli".into());
-    let whisper_model =
-        std::env::var("WHISPER_MODEL").unwrap_or_else(|_| "models/ggml-tiny.bin".into());
-    let llama_bin = std::env::var("LLAMA_BIN").unwrap_or_else(|_| "llama-completion".into());
-    let llama_model =
-        std::env::var("LLAMA_MODEL").unwrap_or_else(|_| "models/cleanup-q4.gguf".into());
-
-    let (tx, mut rx) = tokio::sync::mpsc::channel::<Cue>(32);
+    let (tx, mut rx) = tokio::sync::mpsc::channel::<Cue>(cfg.channel_size);
 
     let cancel = CancellationToken::new();
-    let (capture, audio_rx) = audio::start_loopback()?;
+    let (capture, audio_rx) = audio::start_loopback(cfg.device.as_deref())?;
     info!(device = %capture.device_name, rate = capture.sample_rate, "capture started");
 
-    let stt = stt::WhisperCli {
-        bin: PathBuf::from(whisper_bin),
-        model: PathBuf::from(whisper_model),
+    let timeout = Duration::from_millis(cfg.cleanup_timeout_ms);
+    let cleaner: Box<dyn Cleaner> = match (cfg.cleanup, &cfg.llama_server) {
+        (false, _) => Box::new(cleanup::Passthrough),
+        // One warm llama-server.
+        (true, Some(server)) => Box::new(cleanup::LlamaServer::spawn(
+            server,
+            &cfg.llama_model,
+            timeout,
+        )?),
+        // llama-completion per line.
+        (true, None) => Box::new(cleanup::LlamaCli {
+            bin: cfg.llama_bin.clone(),
+            model: cfg.llama_model.clone(),
+            timeout,
+        }),
     };
-
-    // LLAMA_SERVER set: one warm llama-server. Unset: llama-completion per line.
-    if let Ok(server_bin) = std::env::var("LLAMA_SERVER") {
-        let cleaner =
-            cleanup::LlamaServer::spawn(&PathBuf::from(server_bin), &PathBuf::from(llama_model))?;
-        tokio::spawn(pipeline::run(
-            audio_rx,
-            capture.sample_rate,
-            stt,
-            cleaner,
-            tx,
-            cancel.clone(),
-        ));
-    } else {
-        let cleaner = cleanup::LlamaCli {
-            bin: PathBuf::from(llama_bin),
-            model: PathBuf::from(llama_model),
-        };
-        tokio::spawn(pipeline::run(
-            audio_rx,
-            capture.sample_rate,
-            stt,
-            cleaner,
-            tx,
-            cancel.clone(),
-        ));
-    }
+    let stt = stt::WhisperCli {
+        bin: cfg.whisper_bin.clone(),
+        model: cfg.whisper_model.clone(),
+        language: cfg.language.clone(),
+    };
+    tokio::spawn(pipeline::run_with(
+        audio_rx,
+        capture.sample_rate,
+        stt,
+        cleaner,
+        tx,
+        cancel.clone(),
+        cfg.vad,
+        Duration::from_millis(cfg.partial_every_ms),
+    ));
 
     // v0 surface: terminal. The same Cue stream is what an eframe/Tauri overlay
     // and the later browser extension subscribe to.

@@ -84,17 +84,19 @@ cmake --build llama.cpp/build -j --target llama-completion --target llama-server
 ## Run
 
 ```bash
-cp .env.example .env   # edit paths if yours differ
+cp live-subs.example.toml live-subs.toml   # edit paths if yours differ
 cargo run --release
 ```
 
-Set `LLAMA_SERVER` to the `llama-server` binary to keep the cleanup model loaded between lines. Unset, each line spawns `llama-completion` and reloads the model.
+Config precedence, later wins: defaults, `live-subs.toml` (current directory, then the user config dir; or `--config <path>`), env vars, CLI flags. Env names `WHISPER_BIN`, `WHISPER_MODEL`, `LLAMA_BIN`, `LLAMA_MODEL`, `LLAMA_SERVER`, `SUBS_DEVICE` still work, also from a `.env` file. `--print-config` shows the effective result; see `--help` for flags.
+
+Set `llama_server` to the `llama-server` binary to keep the cleanup model loaded between lines. Unset, each line spawns `llama-completion` and reloads the model.
 
 macOS asks for system-audio recording permission. Grant it to the terminal you launch from.
 
-Device selection: `cargo run -- --list-devices` prints `in`/`out`, a `*` on the default, name, rate and channels. `SUBS_DEVICE` is an exact name from that list, input or output. Unset, the default output device is used.
+Device selection: `cargo run -- --list-devices` prints `in`/`out`, a `*` on the default, name, rate and channels. `device` (or `--device`, or `SUBS_DEVICE`) is an exact name from that list, input or output. Unset, the default output device is used.
 
-- macOS: the default output device works as is. To pick another, set `SUBS_DEVICE` to an `out` name.
+- macOS: the default output device works as is. To pick another, set `device` to an `out` name.
 - Windows: the WASAPI output device name (`out`).
 - Linux: the `.monitor` source name. `--list-devices` shows it, or use `pactl list sources short`.
 
