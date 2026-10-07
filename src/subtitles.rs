@@ -21,6 +21,7 @@ pub struct SubtitleState {
     lines: VecDeque<Line>,
     ttl: Duration,
     max_lines: usize,
+    paused: bool,
 }
 
 impl SubtitleState {
@@ -29,10 +30,26 @@ impl SubtitleState {
             lines: VecDeque::new(),
             ttl,
             max_lines: max_lines.max(1),
+            paused: false,
         }
     }
 
+    /// Pausing clears the screen and ignores cues until resumed.
+    pub fn set_paused(&mut self, paused: bool) {
+        self.paused = paused;
+        if paused {
+            self.lines.clear();
+        }
+    }
+
+    pub fn is_paused(&self) -> bool {
+        self.paused
+    }
+
     pub fn apply(&mut self, cue: &Cue, now: Instant) {
+        if self.paused {
+            return;
+        }
         let is_partial = matches!(cue.kind, CueKind::Partial);
         match self.lines.iter_mut().find(|l| l.id == cue.id) {
             Some(l) if !l.is_partial && is_partial => {} // late partial
@@ -104,6 +121,19 @@ mod tests {
         assert_eq!(texts(&s), [("hello".into(), true)]);
         s.apply(&cue(CueKind::Final, 1, "Hello."), t);
         assert_eq!(texts(&s), [("Hello.".into(), false)]);
+    }
+
+    #[test]
+    fn paused_clears_and_ignores_cues() {
+        let t = Instant::now();
+        let mut s = SubtitleState::new(Duration::from_secs(4), 2);
+        s.apply(&cue(CueKind::Final, 1, "Hello."), t);
+        s.set_paused(true);
+        s.apply(&cue(CueKind::Final, 2, "Ignored."), t);
+        assert!(texts(&s).is_empty());
+        s.set_paused(false);
+        s.apply(&cue(CueKind::Final, 3, "Back."), t);
+        assert_eq!(texts(&s), [("Back.".into(), false)]);
     }
 
     #[test]

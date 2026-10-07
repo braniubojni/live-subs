@@ -6,10 +6,12 @@ use crate::pipeline::Cue;
 use crate::subtitles::SubtitleState;
 use anyhow::{anyhow, Result};
 use eframe::egui::{self, Align, Color32, Layout, Pos2, RichText, Vec2, ViewportCommand};
-use std::sync::{Arc, Mutex};
+use std::sync::{mpsc, Arc, Mutex};
 use std::time::{Duration, Instant};
 use tokio::sync::broadcast::{error::RecvError, Receiver};
 use tokio_util::sync::CancellationToken;
+use tray_icon::menu::{Menu, MenuEvent, MenuId, MenuItem};
+use tray_icon::{Icon, TrayIcon, TrayIconBuilder};
 
 /// Gap between the window and the bottom of the screen.
 const BOTTOM_MARGIN: f32 = 60.0;
@@ -27,6 +29,44 @@ struct Overlay {
     state: Arc<Mutex<SubtitleState>>,
     cancel: CancellationToken,
     placed: bool,
+    tray: Option<Tray>,
+}
+
+/// Menu-bar / system-tray control. The icon must stay alive or it vanishes.
+struct Tray {
+    _icon: TrayIcon,
+    pause: MenuItem,
+    quit: MenuId,
+    events: mpsc::Receiver<MenuId>,
+}
+
+impl Tray {
+    /// Must run on the main thread after the event loop starts (macOS).
+    fn new(ctx: egui::Context) -> Result<Self> {
+        let menu = Menu::new();
+        let pause = MenuItem::new("Pause", true, None);
+        let quit = MenuItem::new("Quit", true, None);
+        menu.append_items(&[&pause, &quit])?;
+        let (tx, events) = mpsc::channel();
+        // The handler runs on the winit thread; wake the window to drain `events`.
+        MenuEvent::set_event_handler(Some(move |e: MenuEvent| {
+            let _ = tx.send(e.id);
+            ctx.request_repaint();
+        }));
+        // ponytail: flat white square, a real icon comes with packaging (10).
+        let icon = Icon::from_rgba(vec![255; 16 * 16 * 4], 16, 16)?;
+        let _icon = TrayIconBuilder::new()
+            .with_menu(Box::new(menu))
+            .with_icon(icon)
+            .with_tooltip("live-subs")
+            .build()?;
+        Ok(Self {
+            _icon,
+            pause,
+            quit: quit.id().clone(),
+            events,
+        })
+    }
 }
 
 impl Overlay {
@@ -57,6 +97,17 @@ impl eframe::App for Overlay {
         }
         let now = Instant::now();
         let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(t) = &self.tray {
+            while let Ok(id) = t.events.try_recv() {
+                if id == t.quit {
+                    self.cancel.cancel();
+                } else if id == *t.pause.id() {
+                    let paused = !state.is_paused();
+                    state.set_paused(paused);
+                    t.pause.set_text(if paused { "Resume" } else { "Pause" });
+                }
+            }
+        }
         state.expire(now);
         if let Some(at) = state.next_expiry() {
             ctx.request_repaint_after(at.saturating_duration_since(now));
@@ -119,6 +170,7 @@ pub fn run(
             let st = app_state.clone();
             let c = app_cancel.clone();
             let ctx2 = ctx.clone();
+            let ctx3 = ctx.clone();
             rt.spawn(async move {
                 loop {
                     match cues.recv().await {
@@ -138,7 +190,11 @@ pub fn run(
                 c.cancelled().await;
                 ctx2.request_repaint();
             });
+            let tray = Tray::new(ctx3)
+                .map_err(|e| tracing::warn!("tray unavailable: {e}"))
+                .ok();
             Ok(Box::new(Overlay {
+                tray,
                 cfg,
                 state: app_state,
                 cancel: app_cancel,
