@@ -10,3 +10,8 @@ Steps (each OS):
 - [ ] macOS (loopback, e.g. BlackHole as output device)
 - [ ] Windows (WASAPI output device by name)
 - [ ] Linux (PipeWire/Pulse; `.monitor` source or sink name)
+
+## Stream error recovery
+- [ ] macOS: run with `SUBS_DEVICE` unset, change the default output (or unplug headphones). Log shows `capture resumed` within 2 s and subtitles continue.
+- [ ] Windows: same.
+- [ ] Linux: same.
