@@ -14,6 +14,7 @@ Constraints from the root [README](../README.md) apply to every spec: no `unsafe
 
 | # | Area | Why it sits here |
 | --- | --- | --- |
+| 00 | [local](00-local/README.md) | Checks that need `whisper-cli`, a model file, or a local in-process build. Do these before treating 03 as proven on a machine. |
 | 01 | [capture](01-capture/README.md) | Rate plumbing and callback safety. Everything downstream depends on correct samples. |
 | 02 | [vad](02-vad/README.md) | Cut quality decides subtitle quality. |
 | 03 | [stt](03-stt/README.md) | Correctness bugs in the CLI path, then in-process whisper. |
