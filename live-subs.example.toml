@@ -17,6 +17,7 @@ language = "auto"        # whisper -l
 cleanup = true           # false: raw transcript
 cleanup_timeout_ms = 700 # past this the raw line is shown
 partial_every_ms = 900
+prompt_carry = false     # previous final line as the whisper prompt
 channel_size = 32
 
 [vad]

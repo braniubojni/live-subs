@@ -108,9 +108,11 @@ CI on `main` and on every pull request runs three commands. All three must pass.
 
 ```bash
 cargo fmt --all -- --check
-cargo clippy --all-targets --all-features -- -D warnings
-cargo test --all-targets --all-features
+cargo clippy --all-targets --features overlay,silero -- -D warnings
+cargo test --all-targets --features overlay,silero
 ```
+
+`--features whisper-rs` compiles whisper.cpp into the binary and is not part of this job.
 
 Format before committing: `cargo fmt --all`. `rustfmt.toml` is the only style config. Do not hand-format around it.
 
