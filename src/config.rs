@@ -39,6 +39,7 @@ pub struct Config {
     /// Cue channel capacity.
     pub channel_size: usize,
     pub vad: VadConfig,
+    pub overlay: OverlayConfig,
 }
 
 impl Default for Config {
@@ -57,6 +58,32 @@ impl Default for Config {
             prompt_carry: false,
             channel_size: 32,
             vad: VadConfig::default(),
+            overlay: OverlayConfig::default(),
+        }
+    }
+}
+
+/// Subtitle window. Needs a build with `--features overlay`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct OverlayConfig {
+    pub enabled: bool,
+    pub font_size: f32,
+    /// A line disappears this long after its last update.
+    pub ttl_ms: u64,
+    pub max_lines: usize,
+    /// Window width as a fraction of the screen width.
+    pub width_frac: f32,
+}
+
+impl Default for OverlayConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            font_size: 32.0,
+            ttl_ms: 4000,
+            max_lines: 2,
+            width_frac: 0.8,
         }
     }
 }
@@ -83,6 +110,9 @@ pub struct Cli {
     /// Print the effective config as TOML, then exit.
     #[arg(long)]
     pub print_config: bool,
+    /// Show the subtitle window (build with --features overlay). Key: overlay.enabled.
+    #[arg(long)]
+    pub overlay: bool,
 }
 
 impl Cli {
@@ -96,6 +126,12 @@ impl Cli {
         }
         if self.no_cleanup {
             t.insert("cleanup".into(), false.into());
+        }
+        if self.overlay {
+            t.insert(
+                "overlay".into(),
+                Value::Table(Table::from_iter([("enabled".to_string(), true.into())])),
+            );
         }
         t
     }
@@ -186,7 +222,8 @@ impl Config {
 
     pub fn check_values(&self) -> Result<()> {
         let v = &self.vad;
-        let checks: [(&str, bool, &str); 11] = [
+        let o = &self.overlay;
+        let checks: [(&str, bool, &str); 15] = [
             (
                 "language",
                 !self.language.trim().is_empty(),
@@ -225,6 +262,18 @@ impl Config {
                 "vad.preroll_ms",
                 v.preroll_ms <= v.max_speech_ms,
                 "must be <= vad.max_speech_ms",
+            ),
+            (
+                "overlay.font_size",
+                o.font_size.is_finite() && o.font_size > 0.0,
+                "must be > 0",
+            ),
+            ("overlay.ttl_ms", o.ttl_ms > 0, "must be > 0"),
+            ("overlay.max_lines", o.max_lines >= 1, "must be >= 1"),
+            (
+                "overlay.width_frac",
+                o.width_frac > 0.0 && o.width_frac <= 1.0,
+                "must be in (0, 1]",
             ),
         ];
         match checks.iter().find(|(_, ok, _)| !ok) {
@@ -323,6 +372,10 @@ mod tests {
             ("[vad]\nsilence_ms = 5", "vad.silence_ms"),
             ("[vad]\nmax_speech_ms = 100", "vad.max_speech_ms"),
             ("[vad]\npreroll_ms = 9000", "vad.preroll_ms"),
+            ("[overlay]\nfont_size = 0.0", "overlay.font_size"),
+            ("[overlay]\nttl_ms = 0", "overlay.ttl_ms"),
+            ("[overlay]\nmax_lines = 0", "overlay.max_lines"),
+            ("[overlay]\nwidth_frac = 1.5", "overlay.width_frac"),
             ("bogus = 1", "bogus"),
             ("channel_size = \"x\"", "channel_size"),
         ];

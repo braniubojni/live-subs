@@ -28,3 +28,10 @@ silence_ms = 500
 min_speech_ms = 250
 max_speech_ms = 8000
 preroll_ms = 200
+
+[overlay]                # needs --features overlay
+enabled = false          # or --overlay
+font_size = 32.0
+ttl_ms = 4000            # line disappears this long after its last update
+max_lines = 2
+width_frac = 0.8         # of screen width

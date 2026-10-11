@@ -15,8 +15,7 @@ use std::time::Duration;
 use tokio_util::sync::CancellationToken;
 use tracing::info;
 
-#[tokio::main]
-async fn main() -> Result<()> {
+fn main() -> Result<()> {
     // Optional .env in the working directory. Real env vars win over it.
     dotenvy::dotenv().ok();
 
@@ -30,6 +29,9 @@ async fn main() -> Result<()> {
         return Ok(());
     }
     cfg.check_files()?;
+    if cfg.overlay.enabled && !cfg!(feature = "overlay") {
+        anyhow::bail!("overlay.enabled needs a build with `--features overlay`");
+    }
 
     tracing_subscriber::fmt()
         .with_env_filter(
@@ -38,9 +40,32 @@ async fn main() -> Result<()> {
         )
         .init();
 
-    let (tx, mut rx) = tokio::sync::mpsc::channel::<Cue>(cfg.channel_size);
-
+    // eframe must own the main thread on macOS, so the runtime is built by hand.
+    let rt = tokio::runtime::Runtime::new()?;
     let cancel = CancellationToken::new();
+    // Every subscriber (terminal, overlay, later the browser server) reads this.
+    let (cues, _) = tokio::sync::broadcast::channel::<Cue>(cfg.channel_size);
+
+    #[cfg(feature = "overlay")]
+    if cfg.overlay.enabled {
+        let cfg_run = cfg.clone();
+        // `Capture` is not Send, so `run` gets its own thread.
+        let (h, c, cues2) = (rt.handle().clone(), cancel.clone(), cues.clone());
+        let task = std::thread::spawn(move || h.block_on(run(cfg_run, cues2, c)));
+        live_subs::overlay::run(cfg.overlay, cues.subscribe(), rt.handle().clone(), cancel)?;
+        return task
+            .join()
+            .map_err(|_| anyhow::anyhow!("pipeline thread panicked"))?;
+    }
+    rt.block_on(run(cfg, cues, cancel))
+}
+
+async fn run(
+    cfg: Config,
+    cues: tokio::sync::broadcast::Sender<Cue>,
+    cancel: CancellationToken,
+) -> Result<()> {
+    let (tx, mut rx) = tokio::sync::mpsc::channel::<Cue>(cfg.channel_size);
     let (capture, audio_rx) = audio::start_loopback(cfg.device.as_deref())?;
     info!(device = %capture.device_name, rate = capture.sample_rate, "capture started");
 
@@ -76,8 +101,7 @@ async fn main() -> Result<()> {
         cfg.prompt_carry,
     ));
 
-    // v0 surface: terminal. The same Cue stream is what an eframe/Tauri overlay
-    // and the later browser extension subscribe to.
+    // Terminal prints each cue and fans it out on `cues`.
     // Ctrl-C: cancel the pipeline and stop capture. It flushes any open
     // utterance as a final, then the channel closes and the loop ends. A second
     // Ctrl-C quits at once.
@@ -108,6 +132,7 @@ async fn main() -> Result<()> {
                 continue;
             }
         };
+        let _ = cues.send(cue.clone()); // no subscribers is fine
         match cue.kind {
             pipeline::CueKind::Partial => {
                 eprint!("\r\x1b[2K{}", cue.text);
