@@ -20,11 +20,26 @@ Constraints from the root [README](../README.md) apply to every spec: no `unsafe
 | 04 | [cleanup](04-cleanup/README.md) | Latency cap is unreachable with `llama-cli` cold starts. |
 | 05 | [pipeline](05-pipeline/README.md) | Cue id and ordering bugs. Split into testable stages. |
 | 06 | [config](06-config/README.md) | One config struct replaces scattered env reads. |
-| 07 | [overlay](07-overlay/README.md) | First real UI. Subscribes to `Cue`. |
+| 07 | [overlay](07-overlay/README.md) | First real UI. Subscribes to `Cue`. First slice landed. **Finish it only after 11**: edit mode, multi-monitor and its manual runs come after the GUI and model setup. |
 | 08 | [browser-extension](08-browser-extension/README.md) | Third subscriber over localhost. |
 | 09 | [testing-ci](09-testing-ci/README.md) | Fixtures, benches, CI matrix. |
 | 10 | [packaging](10-packaging/README.md) | Release builds and model download. |
-| 11 | [models-and-setup](11-models-and-setup/README.md) | Engines in the binary, hardware-matched model picker and downloader, settings window. Land before the per-OS manual runs in 01. |
+| 11 | [models-and-setup](11-models-and-setup/README.md) | Engines in the binary, hardware-matched model picker and downloader, settings window. **Next to build after the 07 first slice.** Land before finishing 07 and before the per-OS manual runs in 01. |
+
+## Build flow
+
+1. Implement the remaining code first: 11 (engines, catalogue, matcher, downloader, settings window, first-run), then the rest of 07 (edit mode, multi-monitor), then other open code.
+2. Manual runs come last, once every requested feature is implemented. Do not ask for a manual check, or suggest one as the next step, before that.
+
+## Reporting remaining work
+
+When asked "what spec is remaining", "what is left" or similar, and before asking the user for any manual check, list the remaining work first:
+
+1. Run `grep -c '^- \[ \]' specs/*/README.md` (open) and `grep -c '^- \[x\]' specs/*/README.md` (done). Checkboxes are the source of truth; do not answer from memory.
+2. Report per spec: open / total, then the open item names. Mark which are code still to write and which are only a manual run.
+3. Ask for a manual check only when all requested code is done (see Build flow), and say which boxes it would tick.
+
+A box that landed in code but still needs a manual run stays unticked, with the pending run named in the spec.
 
 ## Known bugs found while writing these
 

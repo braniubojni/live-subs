@@ -15,11 +15,28 @@ jobs:
         with:
           components: rustfmt, clippy
       - name: System libraries
-        # cpal links ALSA on Linux.
-        run: sudo apt-get update && sudo apt-get install -y libasound2-dev pkg-config
+        # cpal links ALSA. `--features overlay` links GTK (tray menu via muda)
+        # plus the X11, Wayland, and Vulkan headers eframe looks up with pkg-config.
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libasound2-dev \
+            pkg-config \
+            libgtk-3-dev \
+            libxkbcommon-dev \
+            libwayland-dev \
+            libvulkan-dev
       - name: Format
         run: cargo fmt --all -- --check
       - name: Lint
         run: cargo clippy --all-targets --all-features -- -D warnings
       - name: Test
         run: cargo test --all-targets --all-features
+
+  overlay-macos:
+    name: build overlay (macOS)
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - run: cargo build --features overlay
