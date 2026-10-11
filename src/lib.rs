@@ -4,6 +4,7 @@
 pub mod audio;
 pub mod cleanup;
 pub mod config;
+pub mod models;
 #[cfg(feature = "overlay")]
 pub mod overlay;
 pub mod pipeline;

@@ -14,23 +14,24 @@ Constraints from the root [README](../README.md) apply to every spec: no `unsafe
 
 | # | Area | Why it sits here |
 | --- | --- | --- |
-| 00 | [local](00-local/README.md) | Checks that need `whisper-cli`, a model file, or a local in-process build. Do these before treating 03 as proven on a machine. |
-| 01 | [capture](01-capture/README.md) | Rate plumbing and callback safety. Everything downstream depends on correct samples. |
+| 11 | [models-and-setup](11-models-and-setup/README.md) | **Build this next.** Settings window: the user picks speech and cleanup models, a language, and starts capture. No model path in the environment. Folder number stays 11; the row is first because the window is the next thing to write. |
+| 00 | [local](00-local/README.md) | After 11. Confirm missing-model, logs, language lock, and latency through that window and `--dev`. |
+| 01 | [capture](01-capture/README.md) | Rate plumbing and callback safety. Everything downstream depends on correct samples. Per-OS manual runs wait until the first-run flow in 11 exists. |
 | 02 | [vad](02-vad/README.md) | Cut quality decides subtitle quality. |
 | 03 | [stt](03-stt/README.md) | Correctness bugs in the CLI path, then in-process whisper. |
 | 04 | [cleanup](04-cleanup/README.md) | Latency cap is unreachable with `llama-cli` cold starts. |
 | 05 | [pipeline](05-pipeline/README.md) | Cue id and ordering bugs. Split into testable stages. |
 | 06 | [config](06-config/README.md) | One config struct replaces scattered env reads. |
-| 07 | [overlay](07-overlay/README.md) | First real UI. Subscribes to `Cue`. First slice landed. **Finish it only after 11**: edit mode, multi-monitor and its manual runs come after the GUI and model setup. |
+| 07 | [overlay](07-overlay/README.md) | Subtitle window. First slice landed. Finish edit mode and multi-monitor after 11. |
 | 08 | [browser-extension](08-browser-extension/README.md) | Third subscriber over localhost. |
 | 09 | [testing-ci](09-testing-ci/README.md) | Fixtures, benches, CI matrix. |
-| 10 | [packaging](10-packaging/README.md) | Release builds and model download. |
-| 11 | [models-and-setup](11-models-and-setup/README.md) | Engines in the binary, hardware-matched model picker and downloader, settings window. **Next to build after the 07 first slice.** Land before finishing 07 and before the per-OS manual runs in 01. |
+| 10 | [packaging](10-packaging/README.md) | Release builds. Model download lives in 11. |
 
 ## Build flow
 
-1. Implement the remaining code first: 11 (engines, catalogue, matcher, downloader, settings window, first-run), then the rest of 07 (edit mode, multi-monitor), then other open code.
-2. Manual runs come last, once every requested feature is implemented. Do not ask for a manual check, or suggest one as the next step, before that.
+1. Write 11 first: engines, catalogue, matcher, downloader, settings window, language control, `--dev` logs, first-run. The user picks models in that window.
+2. Then run [00](00-local/README.md) against that window. Then the rest of 07 (edit mode, multi-monitor). Prompt carry in the window comes after the settings window works.
+3. Other manual runs come after the feature they check is implemented. Do not ask for a manual check, or suggest one as the next step, before that.
 
 ## Reporting remaining work
 
