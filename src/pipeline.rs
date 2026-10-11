@@ -1,6 +1,6 @@
 use crate::audio::AudioSource;
 use crate::cleanup::Cleaner;
-use crate::stt::{with_timeout, Transcriber};
+use crate::stt::{partial_window, with_timeout, Transcriber};
 use crate::vad::{Segmenter, Vad, VadConfig, VadEvent};
 use anyhow::Result;
 use rubato::{FastFixedIn, PolynomialDegree, Resampler};
@@ -30,8 +30,8 @@ pub struct Cue {
     /// Milliseconds from run start to where the cue was cut: now for a
     /// partial, the end of the VAD segment (incl. trailing silence) for a final.
     pub end_ms: u64,
-    /// Language code, omitted when unknown. Nothing sets it yet: `Transcriber`
-    /// returns text only.
+    /// Language code, omitted when unknown. Set from `Transcriber::language`
+    /// after a call, once detection has locked or the config named a language.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub lang: Option<String>,
     /// STT line before cleanup. Finals only, for debugging.
@@ -67,6 +67,7 @@ pub async fn run<A, S, C>(
         cancel,
         VadConfig::default(),
         PARTIAL_EVERY,
+        false,
     )
     .await
 }
@@ -82,6 +83,7 @@ pub async fn run_with<A, S, C>(
     cancel: CancellationToken,
     vad: VadConfig,
     partial_every: Duration,
+    prompt_carry: bool,
 ) where
     A: AudioSource,
     S: Transcriber + 'static,
@@ -100,6 +102,7 @@ pub async fn run_with<A, S, C>(
         TokioClock,
         cancel,
         partial_every,
+        prompt_carry,
     );
     if let Err(err) = w.await {
         tracing::error!(?err, "pipeline stopped");
@@ -256,6 +259,9 @@ struct Finalizer<S, C> {
     live: Arc<Mutex<LiveFinals>>,
     /// Reorder buffer: finals leave in utterance-id order.
     order: Arc<tokio::sync::Mutex<Reorder>>,
+    /// When set, pass the previous emitted final as the whisper prompt.
+    prompt_carry: bool,
+    last_final: Arc<Mutex<Option<String>>>,
 }
 
 impl<S, C> Finalizer<S, C>
@@ -263,7 +269,12 @@ where
     S: Transcriber + 'static,
     C: Cleaner + 'static,
 {
-    fn new(stt: Arc<S>, cleaner: Arc<C>, tx: tokio::sync::mpsc::Sender<Cue>) -> Self {
+    fn new(
+        stt: Arc<S>,
+        cleaner: Arc<C>,
+        tx: tokio::sync::mpsc::Sender<Cue>,
+        prompt_carry: bool,
+    ) -> Self {
         Self {
             stt,
             cleaner,
@@ -272,7 +283,21 @@ where
             ended: Arc::new(AtomicU64::new(0)),
             live: Arc::default(),
             order: Arc::default(),
+            prompt_carry,
+            last_final: Arc::default(),
         }
+    }
+
+    /// Previous emitted final, when carry is on and there is one.
+    fn carried_prompt(&self) -> Option<String> {
+        if !self.prompt_carry {
+            return None;
+        }
+        self.last_final
+            .lock()
+            .unwrap()
+            .clone()
+            .filter(|s| !s.is_empty())
     }
 
     fn spawn_partial(&self, speech: Vec<f32>, span: Span, busy: Arc<AtomicBool>) {
@@ -280,8 +305,15 @@ where
         let tx = self.tx.clone();
         let ended = self.ended.clone();
         let cue_id = self.id;
+        let prompt = self.carried_prompt();
+        // Partials re-run often. Cap the audio so a long utterance stays bounded.
+        let speech = partial_window(&speech).to_vec();
         tokio::spawn(async move {
-            let text = stt.transcribe(&speech).await.unwrap_or_default();
+            let text = stt
+                .transcribe_with_prompt(&speech, prompt.as_deref())
+                .await
+                .unwrap_or_default();
+            let lang = stt.language();
             busy.store(false, Ordering::Release);
             // ponytail: check-then-send is not atomic; the final needs a
             // full STT run first, so the window is negligible. Per-utterance
@@ -294,7 +326,7 @@ where
                     id: cue_id,
                     start_ms: span.start_ms,
                     end_ms: span.end_ms,
-                    lang: None,
+                    lang,
                     raw: None,
                 });
             }
@@ -330,10 +362,17 @@ where
         let live = self.live.clone();
         let order = self.order.clone();
         let ended_at = Instant::now();
+        let prompt = self.carried_prompt();
+        let last_final = self.last_final.clone();
+        let prompt_carry = self.prompt_carry;
         tokio::spawn(async move {
-            let raw = with_timeout(stt.transcribe(&speech), Duration::from_secs(4))
-                .await
-                .unwrap_or_default();
+            let raw = with_timeout(
+                stt.transcribe_with_prompt(&speech, prompt.as_deref()),
+                Duration::from_secs(4),
+            )
+            .await
+            .unwrap_or_default();
+            let lang = stt.language();
             let stt_done = Instant::now();
             if !raw.is_empty() {
                 let _ = tx.try_send(Cue {
@@ -342,7 +381,7 @@ where
                     id: cue_id,
                     start_ms: span.start_ms,
                     end_ms: span.end_ms,
-                    lang: None,
+                    lang: lang.clone(),
                     raw: None,
                 });
                 // biased: a final already shed must not start cleanup at all.
@@ -362,13 +401,16 @@ where
                     "final timing"
                 );
                 live.lock().unwrap().retain(|(i, _)| *i != cue_id);
+                if prompt_carry {
+                    *last_final.lock().unwrap() = Some(text.clone());
+                }
                 let cue = Cue {
                     kind: CueKind::Final,
                     text,
                     id: cue_id,
                     start_ms: span.start_ms,
                     end_ms: span.end_ms,
-                    lang: None,
+                    lang,
                     raw: Some(raw),
                 };
                 emit_final(&order, &tx, cue_id, Some(cue)).await;
@@ -391,6 +433,7 @@ async fn worker<A, V, S, C, K>(
     clock: K,
     cancel: CancellationToken,
     partial_every: Duration,
+    prompt_carry: bool,
 ) -> Result<()>
 where
     A: AudioSource,
@@ -401,7 +444,7 @@ where
 {
     let mut resample = Resample::new(in_rate)?;
     let mut partials = PartialScheduler::new(clock, partial_every);
-    let mut finals = Finalizer::new(stt, cleaner, tx);
+    let mut finals = Finalizer::new(stt, cleaner, tx, prompt_carry);
     let mut pending: Vec<f32> = Vec::new();
     let mut frame: Vec<f32> = Vec::with_capacity(960);
     // Input samples consumed, skipped frames included. The run timeline is
@@ -537,6 +580,7 @@ mod tests {
             TokioClock,
             cancel.clone(),
             PARTIAL_EVERY,
+            false,
         ));
         let mut got = Vec::new();
         while let Ok(Some(cue)) = tokio::time::timeout(Duration::from_secs(2), rx.recv()).await {
@@ -584,6 +628,7 @@ mod tests {
             TokioClock,
             cancel.clone(),
             PARTIAL_EVERY,
+            false,
         ));
         let mut last = None;
         while let Ok(Some(cue)) = tokio::time::timeout(Duration::from_secs(2), rx.recv()).await {
@@ -685,6 +730,92 @@ mod tests {
         assert_eq!(
             serde_json::to_string(&fin).unwrap(),
             r#"{"kind":"final","text":"Hello.","id":7,"start_ms":1200,"end_ms":2900,"lang":"en","raw":"hello"}"#
+        );
+    }
+
+    struct Rec {
+        lens: Mutex<Vec<usize>>,
+        prompts: Mutex<Vec<Option<String>>>,
+    }
+
+    #[async_trait::async_trait]
+    impl Transcriber for Rec {
+        async fn transcribe(&self, pcm16k: &[f32]) -> Result<String> {
+            self.transcribe_with_prompt(pcm16k, None).await
+        }
+
+        async fn transcribe_with_prompt(
+            &self,
+            pcm16k: &[f32],
+            prompt: Option<&str>,
+        ) -> Result<String> {
+            self.lens.lock().unwrap().push(pcm16k.len());
+            self.prompts
+                .lock()
+                .unwrap()
+                .push(prompt.map(str::to_string));
+            Ok("hello".into())
+        }
+    }
+
+    #[tokio::test]
+    async fn partial_window_is_four_seconds_and_final_is_the_whole_utterance() {
+        let rec = Arc::new(Rec {
+            lens: Mutex::new(Vec::new()),
+            prompts: Mutex::new(Vec::new()),
+        });
+        let (tx, mut rx) = tokio::sync::mpsc::channel(8);
+        let mut finals = Finalizer::new(rec.clone(), Arc::new(Fixed), tx, false);
+        let speech = vec![0.2_f32; crate::stt::PARTIAL_WINDOW_SAMPLES + 8_000];
+        let span = Span {
+            start_ms: 0,
+            end_ms: 5_000,
+        };
+        finals.spawn_partial(speech.clone(), span, Arc::new(AtomicBool::new(false)));
+        let partial = rx.recv().await.unwrap();
+        assert!(matches!(partial.kind, CueKind::Partial));
+        finals.end(speech, span);
+        let mut saw_final = false;
+        while let Some(cue) = rx.recv().await {
+            if matches!(cue.kind, CueKind::Final) {
+                saw_final = true;
+                break;
+            }
+        }
+        assert!(saw_final);
+        assert_eq!(
+            rec.lens.lock().unwrap().as_slice(),
+            [
+                crate::stt::PARTIAL_WINDOW_SAMPLES,
+                crate::stt::PARTIAL_WINDOW_SAMPLES + 8_000
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn prompt_carry_passes_the_previous_final() {
+        let rec = Arc::new(Rec {
+            lens: Mutex::new(Vec::new()),
+            prompts: Mutex::new(Vec::new()),
+        });
+        let (tx, mut rx) = tokio::sync::mpsc::channel(8);
+        let mut finals = Finalizer::new(rec.clone(), Arc::new(Fixed), tx, true);
+        let span = Span {
+            start_ms: 0,
+            end_ms: 100,
+        };
+        let speech = vec![0.2_f32; 1_600];
+        finals.end(speech.clone(), span);
+        // Partial from the final task, then the final itself.
+        assert!(matches!(rx.recv().await.unwrap().kind, CueKind::Partial));
+        let fin = rx.recv().await.unwrap();
+        assert_eq!(fin.text, "HELLO");
+        finals.end(speech, span);
+        let _ = rx.recv().await.unwrap();
+        let _ = rx.recv().await.unwrap();
+        assert_eq!(
+            rec.prompts.lock().unwrap().as_slice(),
+            [None, Some("HELLO".into())]
         );
     }
 }

@@ -34,6 +34,8 @@ pub struct Config {
     pub cleanup: bool,
     pub cleanup_timeout_ms: u64,
     pub partial_every_ms: u64,
+    /// Pass the previous final line to whisper as `--prompt`.
+    pub prompt_carry: bool,
     /// Cue channel capacity.
     pub channel_size: usize,
     pub vad: VadConfig,
@@ -53,6 +55,7 @@ impl Default for Config {
             cleanup: true,
             cleanup_timeout_ms: 700,
             partial_every_ms: 900,
+            prompt_carry: false,
             channel_size: 32,
             vad: VadConfig::default(),
             overlay: OverlayConfig::default(),
@@ -280,10 +283,14 @@ impl Config {
     }
 
     pub fn check_files(&self) -> Result<()> {
+        // In-process whisper does not shell out, so the CLI binary is unused.
+        #[cfg(not(feature = "whisper-rs"))]
         let mut need = vec![
             ("whisper_bin", &self.whisper_bin, true),
             ("whisper_model", &self.whisper_model, false),
         ];
+        #[cfg(feature = "whisper-rs")]
+        let mut need = vec![("whisper_model", &self.whisper_model, false)];
         if self.cleanup {
             need.push(("llama_model", &self.llama_model, false));
             match &self.llama_server {
@@ -392,6 +399,7 @@ mod tests {
         };
         let err = c.check_files().unwrap_err().to_string();
         assert!(err.contains("whisper_model"), "{err}");
+        assert!(err.contains(&model.display().to_string()), "{err}");
         std::fs::write(&model, "").unwrap();
         c.check_files().unwrap();
         c.cleanup = true; // llama files are checked only when cleanup is on

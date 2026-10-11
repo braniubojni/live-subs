@@ -29,9 +29,10 @@ jobs:
       - name: Format
         run: cargo fmt --all -- --check
       - name: Lint
-        run: cargo clippy --all-targets --all-features -- -D warnings
+        # whisper-rs compiles whisper.cpp and is not part of this job (spec 09).
+        run: cargo clippy --all-targets --features overlay,silero -- -D warnings
       - name: Test
-        run: cargo test --all-targets --all-features
+        run: cargo test --all-targets --features overlay,silero
 
   overlay-macos:
     name: build overlay (macOS)

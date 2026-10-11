@@ -85,11 +85,10 @@ async fn run(
             timeout,
         }),
     };
-    let stt = stt::WhisperCli {
-        bin: cfg.whisper_bin.clone(),
-        model: cfg.whisper_model.clone(),
-        language: cfg.language.clone(),
-    };
+    #[cfg(feature = "whisper-rs")]
+    let stt = stt::WhisperRs::load(&cfg.whisper_model, cfg.language.clone())?;
+    #[cfg(not(feature = "whisper-rs"))]
+    let stt = stt::WhisperCli::new(&cfg.whisper_bin, &cfg.whisper_model, cfg.language.clone());
     tokio::spawn(pipeline::run_with(
         audio_rx,
         capture.sample_rate,
@@ -99,6 +98,7 @@ async fn run(
         cancel.clone(),
         cfg.vad,
         Duration::from_millis(cfg.partial_every_ms),
+        cfg.prompt_carry,
     ));
 
     // Terminal prints each cue and fans it out on `cues`.
