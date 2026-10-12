@@ -1,0 +1,124 @@
+# Bundled catalogue. Hashes are the Hugging Face LFS oids (sha256).
+# min_ram_mb is the working set the matcher budgets against, not the file size.
+# realtime is the hardware where this model keeps up with speech.
+# Speed tags are the matcher's input; measured latency stays in specs 00 and 04.
+
+[[model]]
+id = "ggml-tiny"
+kind = "stt"
+name = "Whisper tiny"
+url = "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-tiny.bin"
+size = 77691713
+sha256 = "be07e048e1e599ad46341c8d2a135645097a538221678b7acdd1b1919c6e1b21"
+licence = "MIT"
+min_ram_mb = 1024
+languages = ["multi"]
+realtime = ["cpu", "metal", "cuda", "vulkan"]
+
+[[model]]
+id = "ggml-tiny.en"
+kind = "stt"
+name = "Whisper tiny (English)"
+url = "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-tiny.en.bin"
+size = 77704715
+sha256 = "921e4cf8686fdd993dcd081a5da5b6c365bfde1162e72b08d75ac75289920b1f"
+licence = "MIT"
+min_ram_mb = 1024
+languages = ["en"]
+realtime = ["cpu", "metal", "cuda", "vulkan"]
+
+[[model]]
+id = "ggml-base"
+kind = "stt"
+name = "Whisper base"
+url = "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-base.bin"
+size = 147951465
+sha256 = "60ed5bc3dd14eea856493d334349b405782ddcaf0028d4b5df4088345fba2efe"
+licence = "MIT"
+min_ram_mb = 1400
+languages = ["multi"]
+realtime = ["cpu", "metal", "cuda", "vulkan"]
+
+[[model]]
+id = "ggml-base.en"
+kind = "stt"
+name = "Whisper base (English)"
+url = "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-base.en.bin"
+size = 147964211
+sha256 = "a03779c86df3323075f5e796cb2ce5029f00ec8869eee3fdfb897afe36c6d002"
+licence = "MIT"
+min_ram_mb = 1400
+languages = ["en"]
+realtime = ["cpu", "metal", "cuda", "vulkan"]
+
+[[model]]
+id = "ggml-small"
+kind = "stt"
+name = "Whisper small"
+url = "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-small.bin"
+size = 487601967
+sha256 = "1be3a9b2063867b937e64e2ec7483364a79917e157fa98c5d94b5c1fffea987b"
+licence = "MIT"
+min_ram_mb = 2500
+languages = ["multi"]
+realtime = ["metal", "cuda", "vulkan"]
+
+[[model]]
+id = "ggml-small.en"
+kind = "stt"
+name = "Whisper small (English)"
+url = "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-small.en.bin"
+size = 487614201
+sha256 = "c6138d6d58ecc8322097e2f987c32f1be8bb0a18532a3f88f734d1bbf9c41e5d"
+licence = "MIT"
+min_ram_mb = 2500
+languages = ["en"]
+realtime = ["metal", "cuda", "vulkan"]
+
+[[model]]
+id = "ggml-medium"
+kind = "stt"
+name = "Whisper medium"
+url = "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-medium.bin"
+size = 1533763059
+sha256 = "6c14d5adee5f86394037b4e4e8b59f1673b6cee10e3cf0b11bbdbee79c156208"
+licence = "MIT"
+min_ram_mb = 5120
+languages = ["multi"]
+realtime = ["metal", "cuda"]
+
+[[model]]
+id = "ggml-medium.en"
+kind = "stt"
+name = "Whisper medium (English)"
+url = "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-medium.en.bin"
+size = 1533774781
+sha256 = "cc37e93478338ec7700281a7ac30a10128929eb8f427dda2e865faa8f6da4356"
+licence = "MIT"
+min_ram_mb = 5120
+languages = ["en"]
+realtime = ["metal", "cuda"]
+
+[[model]]
+id = "smollm2-360m-q4"
+kind = "cleanup"
+name = "SmolLM2 360M Q4"
+url = "https://huggingface.co/bartowski/SmolLM2-360M-Instruct-GGUF/resolve/main/SmolLM2-360M-Instruct-Q4_K_M.gguf"
+size = 270590880
+sha256 = "2fa3f013dcdd7b99f9b237717fa0b12d75bbb89984cc1274be1471a465bac9c2"
+licence = "Apache-2.0"
+min_ram_mb = 800
+languages = ["en"]
+realtime = ["cpu", "metal", "cuda", "vulkan"]
+
+[[model]]
+id = "s1-mini-q4"
+kind = "cleanup"
+name = "S1-mini Q4"
+url = "https://huggingface.co/superwhisper/s1-mini-GGUF/resolve/main/s1-mini-q4_k_m.gguf"
+size = 484219808
+sha256 = "3b41ebe2502cbd03e811d5d16b022f5ab551eda58d62597d152f89535003c634"
+licence = "Apache-2.0 + S1-mini name"
+min_ram_mb = 1500
+languages = ["en"]
+realtime = ["cpu", "metal", "cuda", "vulkan"]
