@@ -1,0 +1,16 @@
+---
+description: Spec requests change spec files only. Never the codebase.
+alwaysApply: true
+---
+
+# Specs only
+
+If the user asks to write, implement, update, create, or otherwise work on a spec, change spec files only. No source, tests, configs, or other codebase files. Wording inside a spec is not permission to edit the code it describes.
+
+That includes "implement the spec", "implement another spec", and "update the spec". Those are spec-folder edits. They are not a request to build the feature.
+
+1. Do not write or edit any files yet. Read the codebase and the conversation first.
+2. Then write or edit only the spec file they asked for. No other spec files, no implementation, no drive-by edits.
+3. Do not start implementation after the spec unless the user asks for the code itself, in words that are not about the spec.
+
+Code changes happen only when the user asks for the code and the request is not a spec request.
