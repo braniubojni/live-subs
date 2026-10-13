@@ -88,7 +88,7 @@ impl Cleaner for LlamaCli {
     }
 }
 
-fn prompt(raw: &str) -> String {
+pub(crate) fn prompt(raw: &str) -> String {
     format!(
         "<|im_start|>system\n{SYSTEM}<|im_end|>\n<|im_start|>user\n{raw}<|im_end|>\n<|im_start|>assistant\n"
     )
@@ -592,3 +592,149 @@ mod tests {
         assert_eq!(accept_cleanup(raw, invented), raw);
     }
 }
+
+/// In-process llama.cpp. The model is loaded once in [`LlamaInProc::load`].
+#[cfg(feature = "llama")]
+mod llama_inproc {
+    use super::{accept_cleanup, prompt};
+    use anyhow::{anyhow, Result};
+    use llama_cpp_2::context::params::LlamaContextParams;
+    use llama_cpp_2::llama_backend::LlamaBackend;
+    use llama_cpp_2::llama_batch::LlamaBatch;
+    use llama_cpp_2::model::params::LlamaModelParams;
+    use llama_cpp_2::model::LlamaModel;
+    use llama_cpp_2::sampling::LlamaSampler;
+    use std::num::NonZeroU32;
+    use std::path::Path;
+    use std::sync::{Arc, Mutex};
+    use std::time::Duration;
+
+    struct Engine {
+        backend: LlamaBackend,
+        model: LlamaModel,
+    }
+
+    pub struct LlamaInProc {
+        inner: Arc<Mutex<Engine>>,
+        timeout: Duration,
+    }
+
+    impl LlamaInProc {
+        /// Load `model` once. Later `clean` calls do not reload it.
+        pub fn load(model: impl AsRef<Path>, timeout: Duration) -> Result<Self> {
+            let path = model.as_ref();
+            let backend = LlamaBackend::init().map_err(|e| anyhow!("llama backend: {e}"))?;
+            let params = model_params();
+            let model = LlamaModel::load_from_file(&backend, path, &params)
+                .map_err(|e| anyhow!("llama load {}: {e}", path.display()))?;
+            Ok(Self {
+                inner: Arc::new(Mutex::new(Engine { backend, model })),
+                timeout,
+            })
+        }
+    }
+
+    fn model_params() -> LlamaModelParams {
+        #[cfg(target_os = "macos")]
+        {
+            LlamaModelParams::default().with_n_gpu_layers(99)
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            LlamaModelParams::default()
+        }
+    }
+
+    fn infer(engine: &Engine, raw: &str) -> Result<String> {
+        let tokens = engine
+            .model
+            .vocab()
+            .tokenize(prompt(raw).as_bytes(), true, true);
+        if tokens.is_empty() {
+            return Ok(raw.to_string());
+        }
+        let ctx_params = LlamaContextParams::default()
+            .with_n_ctx(Some(NonZeroU32::new(512).unwrap()))
+            .with_n_threads(4);
+        let mut ctx = engine
+            .model
+            .new_context(&engine.backend, ctx_params)
+            .map_err(|e| anyhow!("llama context: {e}"))?;
+        let mut batch = LlamaBatch::new(512, 1);
+        let last = tokens.len() as i32 - 1;
+        for (i, token) in (0_i32..).zip(tokens) {
+            batch
+                .add(token, i, &[0], i == last)
+                .map_err(|e| anyhow!("llama batch: {e}"))?;
+        }
+        ctx.decode(&mut batch)
+            .map_err(|e| anyhow!("llama decode: {e}"))?;
+        let mut n_cur = batch.n_tokens();
+        let end = n_cur + 64;
+        let mut sampler = LlamaSampler::greedy();
+        let mut out = String::new();
+        while n_cur < end {
+            let token = sampler.sample(&ctx, batch.n_tokens() - 1);
+            sampler.accept(token);
+            if engine.model.vocab().is_eog(token) {
+                break;
+            }
+            let bytes = engine.model.vocab().token_to_piece(token, false, None);
+            out.push_str(&String::from_utf8_lossy(&bytes));
+            batch.clear();
+            batch
+                .add(token, n_cur, &[0], true)
+                .map_err(|e| anyhow!("llama batch: {e}"))?;
+            n_cur += 1;
+            ctx.decode(&mut batch)
+                .map_err(|e| anyhow!("llama decode: {e}"))?;
+        }
+        let cleaned = out
+            .lines()
+            .map(str::trim)
+            .find(|l| !l.is_empty())
+            .unwrap_or(raw);
+        Ok(accept_cleanup(raw, cleaned))
+    }
+
+    #[async_trait::async_trait]
+    impl super::Cleaner for LlamaInProc {
+        async fn clean(&self, raw: &str) -> Result<String> {
+            let raw = raw.trim();
+            if raw.is_empty() {
+                return Ok(String::new());
+            }
+            let raw = raw.to_string();
+            let inner = Arc::clone(&self.inner);
+            // ponytail: the timeout drops the wait. The blocking thread still
+            // holds the model until it finishes, so the next line queues behind it.
+            let work = tokio::task::spawn_blocking(move || {
+                let engine = inner.lock().unwrap_or_else(|e| e.into_inner());
+                infer(&engine, &raw)
+            });
+            match tokio::time::timeout(self.timeout, work).await {
+                Ok(Ok(text)) => text,
+                Ok(Err(e)) => Err(anyhow!("llama task: {e}")),
+                Err(_) => Err(anyhow!("cleanup timed out")),
+            }
+        }
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        #[test]
+        fn load_skips_without_a_model_file() {
+            let path = Path::new("models/cleanup-q4.gguf");
+            if !path.is_file() {
+                eprintln!("skip: {} missing", path.display());
+                return;
+            }
+            LlamaInProc::load(path, Duration::from_millis(700)).unwrap();
+        }
+    }
+}
+
+#[cfg(feature = "llama")]
+pub use llama_inproc::LlamaInProc;

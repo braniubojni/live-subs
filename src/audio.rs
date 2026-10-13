@@ -177,6 +177,33 @@ fn pick_name(names: &[String], want: &str) -> Option<usize> {
     names.iter().position(|n| n == want)
 }
 
+/// Output names, then input names, without duplicates. The settings window lists these.
+pub fn device_names() -> Result<Vec<String>> {
+    let host = cpal::default_host();
+    let mut names = Vec::new();
+    {
+        let mut add = |n: String| {
+            if !names.contains(&n) {
+                names.push(n);
+            }
+        };
+        for d in host.output_devices()? {
+            if let Ok(n) = d.name() {
+                add(n);
+            }
+        }
+        for d in host.input_devices()? {
+            if let Ok(n) = d.name() {
+                add(n);
+            }
+        }
+    }
+    if names.is_empty() {
+        anyhow::bail!("no audio device");
+    }
+    Ok(names)
+}
+
 /// Print every input and output device: kind, default marker, name, rate, channels.
 pub fn list_devices() -> Result<()> {
     let host = cpal::default_host();

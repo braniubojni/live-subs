@@ -36,6 +36,8 @@ pub struct Config {
     pub partial_every_ms: u64,
     /// Pass the previous final line to whisper as `--prompt`.
     pub prompt_carry: bool,
+    /// Stderr line per step. Default runs stay quiet.
+    pub dev: bool,
     /// Cue channel capacity.
     pub channel_size: usize,
     pub vad: VadConfig,
@@ -56,6 +58,7 @@ impl Default for Config {
             cleanup_timeout_ms: 700,
             partial_every_ms: 900,
             prompt_carry: false,
+            dev: false,
             channel_size: 32,
             vad: VadConfig::default(),
             overlay: OverlayConfig::default(),
@@ -113,6 +116,9 @@ pub struct Cli {
     /// Show the subtitle window (build with --features overlay). Key: overlay.enabled.
     #[arg(long)]
     pub overlay: bool,
+    /// One stderr line per step (window, download, cue, language lock). Key: dev.
+    #[arg(long)]
+    pub dev: bool,
 }
 
 impl Cli {
@@ -133,7 +139,26 @@ impl Cli {
                 Value::Table(Table::from_iter([("enabled".to_string(), true.into())])),
             );
         }
+        if self.dev {
+            t.insert("dev".into(), true.into());
+        }
         t
+    }
+}
+
+/// `live-subs.toml` in the user config dir, when the home dir is known.
+pub fn user_config_file() -> Option<PathBuf> {
+    user_config_dir().map(|d| d.join(FILE_NAME))
+}
+
+/// Config file that would be loaded for `cli`, if it exists.
+pub fn stored_file(cli: &Cli) -> Option<PathBuf> {
+    match &cli.config {
+        Some(p) => p.is_file().then(|| p.clone()),
+        None => [PathBuf::from(FILE_NAME)]
+            .into_iter()
+            .chain(user_config_file())
+            .find(|p| p.is_file()),
     }
 }
 
@@ -293,6 +318,8 @@ impl Config {
         let mut need = vec![("whisper_model", &self.whisper_model, false)];
         if self.cleanup {
             need.push(("llama_model", &self.llama_model, false));
+            // In-process llama does not shell out, so the CLI binary is unused.
+            #[cfg(not(feature = "llama"))]
             match &self.llama_server {
                 Some(s) => need.push(("llama_server", s, true)),
                 None => need.push(("llama_bin", &self.llama_bin, true)),
@@ -303,6 +330,52 @@ impl Config {
                 bail!("config key `{key}`: file not found: {}", path.display());
             }
         }
+        Ok(())
+    }
+
+    /// Speech or cleanup model path that is not a file, if any.
+    pub fn missing_model(&self) -> Option<&Path> {
+        if !self.whisper_model.is_file() {
+            return Some(&self.whisper_model);
+        }
+        if self.cleanup && !self.llama_model.is_file() {
+            return Some(&self.llama_model);
+        }
+        None
+    }
+
+    /// Write the keys the settings window owns. Other keys already in `path` stay.
+    pub fn save(&self, path: &Path) -> Result<()> {
+        let mut t = if path.is_file() {
+            parse_file(&std::fs::read_to_string(path)?, path)?
+        } else {
+            Table::new()
+        };
+        t.insert(
+            "whisper_model".into(),
+            self.whisper_model.display().to_string().into(),
+        );
+        t.insert(
+            "llama_model".into(),
+            self.llama_model.display().to_string().into(),
+        );
+        t.insert("language".into(), self.language.clone().into());
+        t.insert("prompt_carry".into(), self.prompt_carry.into());
+        t.insert("dev".into(), self.dev.into());
+        match &self.device {
+            Some(d) => {
+                t.insert("device".into(), d.clone().into());
+            }
+            None => {
+                t.remove("device");
+            }
+        }
+        if let Some(parent) = path.parent() {
+            if !parent.as_os_str().is_empty() {
+                std::fs::create_dir_all(parent)?;
+            }
+        }
+        std::fs::write(path, toml::to_string(&t)?)?;
         Ok(())
     }
 }
@@ -415,5 +488,44 @@ mod tests {
         let t = parse_file(&std::fs::read_to_string(&p).unwrap(), &p).unwrap();
         assert_eq!(Config::from_layers([t]).unwrap().language, "fr");
         assert!(parse_file("language = ", &p).is_err());
+    }
+
+    #[test]
+    fn dev_flag_overrides_the_file() {
+        let cli = Cli {
+            dev: true,
+            ..Cli::default()
+        };
+        let c = Config::from_layers([table("dev = false"), cli.layer()]).unwrap();
+        assert!(c.dev);
+        assert!(!Config::default().dev);
+    }
+
+    #[test]
+    fn save_round_trips_the_window_keys() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join(FILE_NAME);
+        let c = Config {
+            whisper_model: "models/ggml-base.bin".into(),
+            llama_model: "models/cleanup.gguf".into(),
+            language: "ru".into(),
+            prompt_carry: true,
+            dev: true,
+            device: Some("Speakers".into()),
+            ..Config::default()
+        };
+        c.save(&p).unwrap();
+        let t = parse_file(&std::fs::read_to_string(&p).unwrap(), &p).unwrap();
+        let loaded = Config::from_layers([t]).unwrap();
+        assert_eq!(loaded.language, "ru");
+        assert_eq!(loaded.whisper_model, c.whisper_model);
+        assert_eq!(loaded.llama_model, c.llama_model);
+        assert!(loaded.prompt_carry);
+        assert!(loaded.dev);
+        assert_eq!(loaded.device.as_deref(), Some("Speakers"));
+        assert_eq!(
+            loaded.cleanup_timeout_ms,
+            Config::default().cleanup_timeout_ms
+        );
     }
 }
