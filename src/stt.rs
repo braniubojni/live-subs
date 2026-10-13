@@ -231,6 +231,10 @@ fn consider_lock(configured: &str, locked: &mut Option<String>, detected: Option
     }
     if let Some((code, p)) = detected {
         if p >= LANG_LOCK_MIN {
+            crate::settings::emit(&crate::settings::DevEvent::LanguageLock {
+                code: &code,
+                probability: p,
+            });
             *locked = Some(code);
         }
     }
