@@ -1,6 +1,7 @@
 //! Settings window state, language autocomplete, and `--dev` lines.
 //! The window renders this; it does not decide it.
 
+use serde::{Deserialize, Serialize};
 use std::sync::atomic::{AtomicBool, Ordering};
 
 /// Whisper language codes and English names. `Auto` is added by [`filter_languages`].
@@ -131,7 +132,8 @@ pub fn filter_languages(query: &str) -> Vec<Lang> {
     rows
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
 pub enum SlotKind {
     Stt,
     Cleanup,
@@ -146,7 +148,7 @@ impl SlotKind {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ModelSlot {
     pub id: String,
     pub path: String,
@@ -154,13 +156,13 @@ pub struct ModelSlot {
     pub present: bool,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Progress {
     pub got: u64,
     pub total: u64,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SettingsState {
     pub stt: Option<ModelSlot>,
     pub cleanup: Option<ModelSlot>,
@@ -190,7 +192,15 @@ impl Default for SettingsState {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// What the settings window renders. Pickers load their own options.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Snapshot {
+    pub state: SettingsState,
+}
+
+/// Internally tagged so the page can send one JSON object per action.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
 pub enum Event {
     Select {
         kind: SlotKind,
@@ -204,14 +214,30 @@ pub enum Event {
         got: u64,
         total: u64,
     },
-    Downloaded(SlotKind),
-    Error(String),
+    Downloaded {
+        kind: SlotKind,
+    },
+    Error {
+        message: String,
+    },
     Start,
     Stop,
-    Language(String),
-    PromptCarry(bool),
-    Device(Option<String>),
-    Cancel(SlotKind),
+    Language {
+        code: String,
+    },
+    PromptCarry {
+        on: bool,
+    },
+    Device {
+        name: Option<String>,
+    },
+    Cancel {
+        kind: SlotKind,
+    },
+    /// The file for this slot is gone. Capture stop is a separate [`Event::Stop`].
+    Removed {
+        kind: SlotKind,
+    },
 }
 
 impl SettingsState {
@@ -245,7 +271,7 @@ impl SettingsState {
                     SlotKind::Cleanup => self.cleanup_progress = p,
                 }
             }
-            Event::Downloaded(kind) => {
+            Event::Downloaded { kind } => {
                 let slot = match kind {
                     SlotKind::Stt => &mut self.stt,
                     SlotKind::Cleanup => &mut self.cleanup,
@@ -259,8 +285,8 @@ impl SettingsState {
                 }
                 self.error = None;
             }
-            Event::Error(msg) => {
-                self.error = Some(msg);
+            Event::Error { message } => {
+                self.error = Some(message);
                 self.running = false;
             }
             Event::Start => match self.block_reason() {
@@ -274,13 +300,26 @@ impl SettingsState {
                 }
             },
             Event::Stop => self.running = false,
-            Event::Language(code) => self.language = code,
-            Event::PromptCarry(on) => self.prompt_carry = on,
-            Event::Device(name) => self.device = name,
-            Event::Cancel(kind) => match kind {
+            Event::Language { code } => self.language = code,
+            Event::PromptCarry { on } => self.prompt_carry = on,
+            Event::Device { name } => self.device = name,
+            Event::Cancel { kind } => match kind {
                 SlotKind::Stt => self.stt_progress = None,
                 SlotKind::Cleanup => self.cleanup_progress = None,
             },
+            Event::Removed { kind } => {
+                let slot = match kind {
+                    SlotKind::Stt => &mut self.stt,
+                    SlotKind::Cleanup => &mut self.cleanup,
+                };
+                if let Some(slot) = slot {
+                    slot.present = false;
+                }
+                match kind {
+                    SlotKind::Stt => self.stt_progress = None,
+                    SlotKind::Cleanup => self.cleanup_progress = None,
+                }
+            }
         }
     }
 
@@ -391,7 +430,7 @@ mod tests {
     #[test]
     fn chosen_language_round_trips_through_config() {
         let mut state = SettingsState::default();
-        state.apply(Event::Language("en".into()));
+        state.apply(Event::Language { code: "en".into() });
         assert_eq!(state.language, "en");
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("live-subs.toml");
@@ -427,7 +466,9 @@ mod tests {
         s.apply(Event::Start);
         assert!(!s.running);
         assert!(s.error.as_deref().unwrap().contains("ggml-tiny"));
-        s.apply(Event::Downloaded(SlotKind::Stt));
+        s.apply(Event::Downloaded {
+            kind: SlotKind::Stt,
+        });
         s.apply(Event::Start);
         assert!(s.running);
         assert!(s.error.is_none());
@@ -436,7 +477,7 @@ mod tests {
     #[test]
     fn prompt_carry_and_progress_are_events() {
         let mut s = SettingsState::default();
-        s.apply(Event::PromptCarry(true));
+        s.apply(Event::PromptCarry { on: true });
         assert!(s.prompt_carry);
         s.apply(Event::Progress {
             kind: SlotKind::Stt,
@@ -489,5 +530,56 @@ mod tests {
         assert_eq!(format_line(&DevEvent::CaptureStarted), "capture started");
         set_dev(false);
         emit(&DevEvent::WindowOpened);
+    }
+
+    #[test]
+    fn snapshot_and_event_round_trip_as_json() {
+        let mut state = SettingsState::default();
+        state.apply(Event::Select {
+            kind: SlotKind::Stt,
+            id: "ggml-tiny".into(),
+            path: "models/ggml-tiny.bin".into(),
+            licence: "MIT".into(),
+            present: true,
+        });
+        state.apply(Event::Language { code: "en".into() });
+        state.apply(Event::PromptCarry { on: true });
+        state.apply(Event::Device {
+            name: Some("BlackHole".into()),
+        });
+        let snap = Snapshot { state };
+        let json = serde_json::to_string(&snap).unwrap();
+        let back: Snapshot = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, snap);
+
+        let event = Event::Removed {
+            kind: SlotKind::Cleanup,
+        };
+        let json = serde_json::to_string(&event).unwrap();
+        assert!(json.contains("\"type\":\"removed\""));
+        let back: Event = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, event);
+    }
+
+    #[test]
+    fn removed_clears_presence_and_progress() {
+        let mut s = SettingsState::default();
+        s.apply(Event::Select {
+            kind: SlotKind::Stt,
+            id: "ggml-tiny".into(),
+            path: "models/ggml-tiny.bin".into(),
+            licence: "MIT".into(),
+            present: true,
+        });
+        s.apply(Event::Progress {
+            kind: SlotKind::Stt,
+            got: 1,
+            total: 2,
+        });
+        s.apply(Event::Removed {
+            kind: SlotKind::Stt,
+        });
+        assert!(!s.stt.unwrap().present);
+        assert!(s.stt_progress.is_none());
     }
 }

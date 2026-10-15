@@ -28,6 +28,63 @@ pub fn url_file_name(url: &str) -> &str {
         .unwrap_or("model")
 }
 
+/// Delete `path` only when it is a file directly inside `dir`, plus a sibling `.partial`.
+/// A path outside `dir` is an error and the file stays.
+pub fn remove_in(dir: &Path, path: &Path) -> Result<()> {
+    let target = child_file(dir, path)?;
+    if target.is_file() {
+        fs::remove_file(&target)?;
+    }
+    let partial = partial_path(&target);
+    if partial.is_file() {
+        fs::remove_file(partial)?;
+    }
+    Ok(())
+}
+
+/// Delete files in `dir`. Subdirectories stay.
+pub fn remove_all_in(dir: &Path) -> Result<()> {
+    if !dir.exists() {
+        return Ok(());
+    }
+    if !dir.is_dir() {
+        bail!("not a directory");
+    }
+    for entry in fs::read_dir(dir)? {
+        let path = entry?.path();
+        if path.is_file() {
+            fs::remove_file(path)?;
+        }
+    }
+    Ok(())
+}
+
+fn child_file(dir: &Path, path: &Path) -> Result<PathBuf> {
+    let dir = fs::canonicalize(dir).with_context(|| format!("models dir {}", dir.display()))?;
+    if path
+        .components()
+        .any(|c| matches!(c, std::path::Component::ParentDir))
+    {
+        bail!("outside models dir");
+    }
+    let name = path.file_name().context("no file name")?;
+    let parent_ok = match path.parent() {
+        Some(parent) if !parent.as_os_str().is_empty() => {
+            let parent = if parent.is_absolute() {
+                parent.to_path_buf()
+            } else {
+                dir.join(parent)
+            };
+            fs::canonicalize(&parent).unwrap_or(parent) == dir
+        }
+        _ => !path.is_absolute(),
+    };
+    if !parent_ok {
+        bail!("outside models dir");
+    }
+    Ok(dir.join(name))
+}
+
 fn partial_path(dest: &Path) -> PathBuf {
     let mut name = dest.file_name().unwrap_or_default().to_os_string();
     name.push(".partial");
@@ -377,5 +434,38 @@ mod tests {
         assert!(err.contains("cancelled"), "{err}");
         assert!(!dest.exists());
         assert!(!partial_path(&dest).exists());
+    }
+
+    #[test]
+    fn remove_in_deletes_the_file_and_partial_only_inside_the_dir() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("tiny.bin");
+        let partial = partial_path(&file);
+        fs::write(&file, b"model").unwrap();
+        fs::write(&partial, b"part").unwrap();
+        remove_in(dir.path(), &file).unwrap();
+        assert!(!file.exists());
+        assert!(!partial.exists());
+
+        let elsewhere = tempfile::tempdir().unwrap();
+        let kept = elsewhere.path().join("other.bin");
+        fs::write(&kept, b"keep").unwrap();
+        let err = remove_in(dir.path(), &kept).unwrap_err().to_string();
+        assert!(err.contains("outside"), "{err}");
+        assert_eq!(fs::read(&kept).unwrap(), b"keep");
+    }
+
+    #[test]
+    fn remove_all_in_skips_subdirectories() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(dir.path().join("a.bin"), b"a").unwrap();
+        fs::create_dir(dir.path().join("nested")).unwrap();
+        fs::write(dir.path().join("nested").join("b.bin"), b"b").unwrap();
+        remove_all_in(dir.path()).unwrap();
+        assert!(!dir.path().join("a.bin").exists());
+        assert_eq!(
+            fs::read(dir.path().join("nested").join("b.bin")).unwrap(),
+            b"b"
+        );
     }
 }
