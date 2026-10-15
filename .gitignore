@@ -3,6 +3,9 @@
 **/*.rs.bk
 .DS_Store
 
+ui/node_modules
+ui/dist
+
 # Models are downloaded locally. Do not commit weights.
 models/*.bin
 models/*.gguf

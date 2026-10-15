@@ -10,7 +10,6 @@ pub mod overlay;
 pub mod pipeline;
 pub mod session;
 pub mod settings;
-#[cfg(feature = "overlay")]
 pub mod setup;
 #[cfg(feature = "silero")]
 pub mod silero;

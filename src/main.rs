@@ -7,7 +7,6 @@
 
 use anyhow::Result;
 use clap::Parser;
-#[cfg(feature = "overlay")]
 use live_subs::config::stored_file;
 use live_subs::config::{Cli, Config};
 use live_subs::pipeline::Cue;
@@ -22,7 +21,7 @@ fn main() -> Result<()> {
     if cli.list_devices {
         return audio::list_devices();
     }
-    #[cfg_attr(not(feature = "overlay"), allow(unused_mut))]
+    #[cfg_attr(not(feature = "settings-ui"), allow(unused_mut))]
     let mut cfg = Config::load(&cli)?;
     settings::set_dev(cfg.dev);
     if cli.print_config {
@@ -43,16 +42,25 @@ fn main() -> Result<()> {
     // eframe must own the main thread on macOS, so the runtime is built by hand.
     let rt = tokio::runtime::Runtime::new()?;
 
-    #[cfg(feature = "overlay")]
-    if live_subs::setup::should_open(stored_file(&cli).is_some(), &cfg) {
-        let has_file = stored_file(&cli).is_some();
-        let save_to = live_subs::setup::save_target(cli.config.as_deref());
-        let started = live_subs::setup::run(cfg, save_to, has_file, rt.handle().clone())?;
-        if !started {
-            anyhow::bail!("closed without a model");
+    // Models already on disk skip the settings window. With no subtitle window
+    // that leaves a headless process loading Whisper, which looks like a hang.
+    let overlay_window = cfg!(feature = "overlay") && cfg.overlay.enabled;
+    let open_settings = live_subs::setup::should_open(stored_file(&cli).is_some(), &cfg)
+        || (cfg!(feature = "settings-ui") && !overlay_window);
+    if open_settings {
+        #[cfg(feature = "settings-ui")]
+        {
+            let has_file = stored_file(&cli).is_some();
+            let save_to = live_subs::setup::save_target(cli.config.as_deref());
+            let started = live_subs::setup::run(cfg, save_to, has_file, rt.handle().clone())?;
+            if !started {
+                anyhow::bail!("closed without a model");
+            }
+            cfg = Config::load(&cli)?;
+            settings::set_dev(cfg.dev);
         }
-        cfg = Config::load(&cli)?;
-        settings::set_dev(cfg.dev);
+        #[cfg(not(feature = "settings-ui"))]
+        anyhow::bail!("settings window needs a build with `--features settings-ui`");
     }
 
     cfg.check_files()?;

@@ -1,0 +1,30 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "live-subs",
+  "version": "0.1.0",
+  "identifier": "com.live-subs.settings",
+  "build": {
+    "frontendDist": "ui/dist",
+    "devUrl": "http://localhost:1420",
+    "beforeBuildCommand": "bun run --cwd ui build",
+    "beforeDevCommand": "bun run --cwd ui dev"
+  },
+  "app": {
+    "windows": [
+      {
+        "label": "main",
+        "title": "live-subs",
+        "width": 520,
+        "height": 720,
+        "resizable": true
+      }
+    ],
+    "security": {
+      "csp": null
+    }
+  },
+  "bundle": {
+    "active": false,
+    "icon": ["icons/icon.png"]
+  }
+}

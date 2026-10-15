@@ -26,6 +26,38 @@ impl HfHub {
     pub fn new(client: reqwest::Client) -> Self {
         Self { client }
     }
+
+    async fn model_files(&self, id: &str) -> Result<Vec<RemoteFile>> {
+        let response = self
+            .client
+            .get(format!(
+                "https://huggingface.co/api/models/{}",
+                encode_path(id)
+            ))
+            .send()
+            .await
+            .map_err(|e| anyhow!("huggingface model: {e}"))?;
+        let status = response.status();
+        let detail = response
+            .text()
+            .await
+            .map_err(|e| anyhow!("huggingface model: {e}"))?;
+        if !status.is_success() {
+            return Err(anyhow!("huggingface model: {}", hub_message(&detail, status)));
+        }
+        parse_models(&detail)
+    }
+}
+
+fn hub_message(body: &str, status: reqwest::StatusCode) -> String {
+    serde_json::from_str::<serde_json::Value>(body)
+        .ok()
+        .and_then(|v| {
+            v.get("error")
+                .and_then(|e| e.as_str())
+                .map(str::to_string)
+        })
+        .unwrap_or_else(|| format!("{status}"))
 }
 
 #[async_trait::async_trait]
@@ -35,37 +67,48 @@ impl ModelSearch for HfHub {
             "https://huggingface.co/api/models?search={}&filter=gguf&limit=5",
             encode_component(query)
         );
-        let body = self
+        let response = self
             .client
             .get(url)
             .send()
             .await
-            .map_err(|e| anyhow!("huggingface search: {e}"))?
+            .map_err(|e| anyhow!("huggingface search: {e}"))?;
+        let status = response.status();
+        let body = response
             .text()
             .await
             .map_err(|e| anyhow!("huggingface search: {e}"))?;
+        if !status.is_success() {
+            return Err(anyhow!("huggingface search: {}", hub_message(&body, status)));
+        }
         let models: Vec<HfModel> =
             serde_json::from_str(&body).map_err(|e| anyhow!("huggingface search: {e}"))?;
         let mut files = Vec::new();
+        let mut detail_error: Option<anyhow::Error> = None;
         for model in models {
-            if model.siblings.is_empty() {
-                if let Some(id) = model.id.clone() {
-                    let detail = self
-                        .client
-                        .get(format!(
-                            "https://huggingface.co/api/models/{}",
-                            encode_path(&id)
-                        ))
-                        .send()
-                        .await
-                        .map_err(|e| anyhow!("huggingface model: {e}"))?
-                        .text()
-                        .await
-                        .map_err(|e| anyhow!("huggingface model: {e}"))?;
-                    files.extend(parse_models(&detail)?);
+            if files.len() >= 24 {
+                break;
+            }
+            let batch = if model.siblings.is_empty() {
+                let Some(id) = model.id.clone() else {
+                    continue;
+                };
+                match self.model_files(&id).await {
+                    Ok(rows) => rows,
+                    Err(e) => {
+                        detail_error.get_or_insert(e);
+                        Vec::new()
+                    }
                 }
             } else {
-                files.extend(files_of(model));
+                files_of(model)
+            };
+            files.extend(batch.into_iter().take(8));
+        }
+        files.truncate(24);
+        if files.is_empty() {
+            if let Some(e) = detail_error {
+                return Err(e);
             }
         }
         Ok(files)
