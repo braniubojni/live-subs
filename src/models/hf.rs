@@ -43,7 +43,10 @@ impl HfHub {
             .await
             .map_err(|e| anyhow!("huggingface model: {e}"))?;
         if !status.is_success() {
-            return Err(anyhow!("huggingface model: {}", hub_message(&detail, status)));
+            return Err(anyhow!(
+                "huggingface model: {}",
+                hub_message(&detail, status)
+            ));
         }
         parse_models(&detail)
     }
@@ -52,11 +55,7 @@ impl HfHub {
 fn hub_message(body: &str, status: reqwest::StatusCode) -> String {
     serde_json::from_str::<serde_json::Value>(body)
         .ok()
-        .and_then(|v| {
-            v.get("error")
-                .and_then(|e| e.as_str())
-                .map(str::to_string)
-        })
+        .and_then(|v| v.get("error").and_then(|e| e.as_str()).map(str::to_string))
         .unwrap_or_else(|| format!("{status}"))
 }
 
@@ -79,7 +78,10 @@ impl ModelSearch for HfHub {
             .await
             .map_err(|e| anyhow!("huggingface search: {e}"))?;
         if !status.is_success() {
-            return Err(anyhow!("huggingface search: {}", hub_message(&body, status)));
+            return Err(anyhow!(
+                "huggingface search: {}",
+                hub_message(&body, status)
+            ));
         }
         let models: Vec<HfModel> =
             serde_json::from_str(&body).map_err(|e| anyhow!("huggingface search: {e}"))?;
